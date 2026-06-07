@@ -17,9 +17,26 @@ from test import Validate
 from myargs import get_args, args_tostring
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-#torch.cuda.set_device(1)
+def resolve_device():
+    requested = os.environ.get('CCFCREC_DEVICE', '').strip().lower()
+    if requested == 'cpu':
+        return torch.device('cpu')
+    if requested == 'cuda' and torch.cuda.is_available():
+        return torch.device('cuda')
+    if requested == 'mps' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    if requested:
+        raise RuntimeError(f"Unsupported or unavailable CCFCREC_DEVICE={requested}")
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+device = resolve_device()
+if device.type == 'cuda':
+    torch.cuda.set_device(int(os.environ.get('CCFCREC_CUDA_DEVICE', '0')))
 
 
 # CCFCRec
@@ -208,6 +225,8 @@ if __name__ == '__main__':
     if args.num_workers > 0:
         loader_kwargs['persistent_workers'] = args.persistent_workers
         loader_kwargs['prefetch_factor'] = args.prefetch_factor
+        if args.multiprocessing_context:
+            loader_kwargs['multiprocessing_context'] = args.multiprocessing_context
     train_loader = torch.utils.data.DataLoader(dataSet, **loader_kwargs)
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)

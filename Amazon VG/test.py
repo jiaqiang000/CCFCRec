@@ -7,9 +7,28 @@ import time
 import os
 from myargs import get_args
 from tqdm import tqdm
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
+
+def resolve_device():
+    requested = os.environ.get('CCFCREC_DEVICE', '').strip().lower()
+    if requested == 'cpu':
+        return torch.device('cpu')
+    if requested == 'cuda' and torch.cuda.is_available():
+        return torch.device('cuda')
+    if requested == 'mps' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    if requested:
+        raise RuntimeError(f"Unsupported or unavailable CCFCREC_DEVICE={requested}")
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+device = resolve_device()
+if device.type == 'cuda':
+    torch.cuda.set_device(int(os.environ.get('CCFCREC_CUDA_DEVICE', '0')))
 
 
 def get_random_user_rank_list(model, genres, image_feature, k):

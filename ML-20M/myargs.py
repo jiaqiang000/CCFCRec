@@ -27,6 +27,7 @@ def get_args():
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')
     parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch factor when num_workers > 0')
+    parser.add_argument('--multiprocessing_context', type=str, default='', help='DataLoader multiprocessing context, e.g. fork on macOS')
     args = parser.parse_args()
     return args
 

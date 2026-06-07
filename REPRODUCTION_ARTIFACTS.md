@@ -86,6 +86,22 @@ save_dict.pkl
 *.pt
 ```
 
+### Mac 本地 MPS 调试
+
+Mac 本地会自动优先选择 MPS，也可以显式指定：
+
+```bash
+cd "/Users/luojiaqiang/Documents/Obsidian Vault/科研/CCFCRec对比学习思路/CCFCRec-code/Amazon VG"
+CCFCREC_DEVICE=mps /opt/anaconda3/envs/ccfcrec-py3.11/bin/python model.py --epoch 1 --save_batch_time 999999999 --num_workers 8 --persistent_workers --multiprocessing_context fork
+```
+
+说明：
+
+- Mac 本地主要用于 smoke test、代码调试和小规模对照，不建议跑完整 `epoch=100`。
+- 本地 M1 Pro 实测 `num_workers=8` 比 `0/2/4/6` 更合适；`6` 会周期性等数据，长期平均不稳定。
+- MPS 不需要 `--pin_memory`，这个参数主要给 CUDA 服务器使用。
+- 如果要强制 CPU 对照，可以设置 `CCFCREC_DEVICE=cpu`。
+
 ## ML-20M
 
 ### 数据位置
