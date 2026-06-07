@@ -31,19 +31,19 @@ validate_rating.csv
 ```bash
 cd "/root/CCFCRec/Amazon VG"
 export CCFCREC_CUDA_DEVICE=0
-/usr/bin/time -v python model.py --epoch 1 --save_batch_time 999999999 --num_workers 32 --pin_memory --persistent_workers 2>&1 | tee smoke_amazon_vg_workers32.log
+/usr/bin/time -v python model.py --epoch 1 --save_batch_time 999999999 --num_workers 45 --pin_memory --persistent_workers 2>&1 | tee smoke_amazon_vg_workers45.log
 ```
 
 这里的 `save_batch_time` 故意设得大于总 batch 数，所以这个 smoke test 不会触发验证，也不会保存 checkpoint。它只用于确认训练入口是否能跑起来，以及估算速度和资源占用。
 
 ### 正式训练
 
-Amazon VG 默认 `batch_size=1024` 时，每个 epoch 有 326 个 batch。`save_batch_time=300` 基本会在每个 epoch 末尾触发一次验证和 checkpoint 保存。当前服务器上 `num_workers=32` 的 smoke test 速度明显优于 `8/16`，所以 Amazon VG 正式训练优先使用 32 workers。
+Amazon VG 默认 `batch_size=1024` 时，每个 epoch 有 326 个 batch。`save_batch_time=300` 基本会在每个 epoch 末尾触发一次验证和 checkpoint 保存。当前服务器是 48 核，`num_workers=45` 可以给主进程、CUDA 搬运、系统和日志留出少量 CPU 余量，所以 Amazon VG 正式训练优先使用 45 workers。
 
 ```bash
 cd "/root/CCFCRec/Amazon VG"
 export CCFCREC_CUDA_DEVICE=0
-/usr/bin/time -v python model.py --epoch 100 --save_batch_time 300 --num_workers 32 --pin_memory --persistent_workers 2>&1 | tee run_amazon_vg_workers32.log
+/usr/bin/time -v python model.py --epoch 100 --save_batch_time 300 --num_workers 45 --pin_memory --persistent_workers 2>&1 | tee run_amazon_vg_workers45.log
 ```
 
 ### 训练生成的文件
@@ -68,7 +68,7 @@ save_dict.pkl    # test.py 需要用到的 user/item/category 映射
 训练日志：
 
 ```text
-/root/CCFCRec/Amazon VG/run_amazon_vg_workers32.log
+/root/CCFCRec/Amazon VG/run_amazon_vg_workers45.log
 ```
 
 最新结果目录可以这样查：
@@ -84,27 +84,6 @@ readme.txt
 result.csv
 save_dict.pkl
 *.pt
-```
-
-### 建议额外记录的环境信息
-
-正式训练前或训练后，建议写一份元信息文件，方便后面追踪复现条件：
-
-```bash
-cd /root/CCFCRec
-{
-  echo "commit: $(git rev-parse HEAD)"
-  echo "date: $(date)"
-  echo "cmd: python model.py --epoch 100 --save_batch_time 300 --num_workers 32 --pin_memory --persistent_workers"
-  python -c "import torch, numpy, pandas, tqdm; print('torch', torch.__version__, torch.version.cuda, torch.cuda.is_available()); print('numpy', numpy.__version__); print('pandas', pandas.__version__); print('tqdm', tqdm.__version__)"
-  nvidia-smi
-} > "/root/CCFCRec/Amazon VG/run_meta_amazon_vg_workers32.txt"
-```
-
-这个文件也要下载：
-
-```text
-/root/CCFCRec/Amazon VG/run_meta_amazon_vg_workers32.txt
 ```
 
 ## ML-20M
@@ -188,25 +167,6 @@ epoch_0batch_6000.pt
 
 ```bash
 ls -td "/root/CCFCRec/ML-20M/result/"* | head -1
-```
-
-### 建议额外记录的环境信息
-
-```bash
-cd /root/CCFCRec
-{
-  echo "commit: $(git rev-parse HEAD)"
-  echo "date: $(date)"
-  echo "cmd: python model.py --epoch 10 --save_batch_time 3000 --num_workers 8 --pin_memory --persistent_workers"
-  python -c "import torch, numpy, pandas, tqdm; print('torch', torch.__version__, torch.version.cuda, torch.cuda.is_available()); print('numpy', numpy.__version__); print('pandas', pandas.__version__); print('tqdm', tqdm.__version__)"
-  nvidia-smi
-} > "/root/CCFCRec/ML-20M/run_meta_ml20m_workers8.txt"
-```
-
-这个文件也要下载：
-
-```text
-/root/CCFCRec/ML-20M/run_meta_ml20m_workers8.txt
 ```
 
 ## 注意事项
