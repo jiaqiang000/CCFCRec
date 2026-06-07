@@ -94,9 +94,6 @@ def build_item_user_interaction_dict(train_csv='data/train_rating.csv',
     return item_user_interaction_dict
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
 class RatingDataset(torch.utils.data.Dataset):
     def __init__(self, train_csv, img_features, genres, category_num, user_serialize_dict,  positive_number, negative_number):
         self.train_csv = train_csv
@@ -131,7 +128,6 @@ class RatingDataset(torch.utils.data.Dataset):
         # 处理 item genres
         genres = torch.full((self.category_num, 1), -1)
         genres_index = self.genres_dict.get(item)
-        genres = genres.to(device)
         genres[genres_index] = 1
         genres = genres.squeeze(dim=1)
         # 处理 item feature
