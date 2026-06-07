@@ -198,11 +198,20 @@ if __name__ == '__main__':
                             user_ser_dict, args.positive_number, args.negative_number)
     args.user_number = dataSet.user_number
     args.item_number = dataSet.item_number
-    train_loader = torch.utils.data.DataLoader(dataSet, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader_kwargs = {
+        'batch_size': args.batch_size,
+        'shuffle': True,
+        'num_workers': args.num_workers,
+    }
+    if args.pin_memory:
+        loader_kwargs['pin_memory'] = True
+    if args.num_workers > 0:
+        loader_kwargs['persistent_workers'] = args.persistent_workers
+        loader_kwargs['prefetch_factor'] = args.prefetch_factor
+    train_loader = torch.utils.data.DataLoader(dataSet, **loader_kwargs)
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)
     optimizer = torch.optim.Adam(myModel.parameters(), lr=args.learning_rate, weight_decay=0.1)
     validator = Validate(validate_csv=vliad_path, user_serialize_dict=user_ser_dict, img=img_feature_dict,
                          genres=asin_category_int_map, category_num=category_ser_map.__len__())
     train(myModel, train_loader, optimizer, validator, args, save_dir)
-

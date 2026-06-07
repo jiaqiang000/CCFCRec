@@ -23,6 +23,10 @@ def get_args():
     parser.add_argument('--contrast_flag', type=bool, default=True, help='contrast job flag')
     parser.add_argument('--user_flag', type=bool, default=False, help='use user to q_v_c flag')
     parser.add_argument('--save_batch_time', type=int, default=3000, help='every batch time save the model')
+    parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
+    parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
+    parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')
+    parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch factor when num_workers > 0')
     args = parser.parse_args()
     return args
 

@@ -184,7 +184,17 @@ if __name__ == '__main__':
                             contrast_self_path, args.positive_number, args.negative_number)
     args.user_number = dataSet.user_number
     args.item_number = dataSet.item_number
-    train_loader = torch.utils.data.DataLoader(dataSet, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader_kwargs = {
+        'batch_size': args.batch_size,
+        'shuffle': True,
+        'num_workers': args.num_workers,
+    }
+    if args.pin_memory:
+        loader_kwargs['pin_memory'] = True
+    if args.num_workers > 0:
+        loader_kwargs['persistent_workers'] = args.persistent_workers
+        loader_kwargs['prefetch_factor'] = args.prefetch_factor
+    train_loader = torch.utils.data.DataLoader(dataSet, **loader_kwargs)
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)
     optimizer = torch.optim.Adam(myModel.parameters(), lr=args.learning_rate, weight_decay=0.1)
