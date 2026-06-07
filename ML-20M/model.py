@@ -14,8 +14,8 @@ from test import Validate
 from myargs import get_args, args_tostring
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-torch.cuda.set_device(1)
+if device.type == 'cuda':
+    torch.cuda.set_device(int(os.environ.get('CCFCREC_CUDA_DEVICE', '0')))
 
 # CCFCRec
 
@@ -191,4 +191,3 @@ if __name__ == '__main__':
     validator = Validate(validate_csv=vliad_path, user_serialize_dict=user_serialize_dict, img=img_feature,
                          genres=movie_onehot)
     train(myModel, train_loader, optimizer, validator, args)
-

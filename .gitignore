@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.venv/
+env/
+
+result/
+*.pt
+*.pth
+*.pkl
+*.npy
+*.npz
+*.csv
+
+ML-20M/data/*
+!ML-20M/data/readme.txt
+Amazon VG/data/*
+!Amazon VG/data/readme.txt
