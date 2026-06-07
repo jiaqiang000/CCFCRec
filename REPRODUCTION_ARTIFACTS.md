@@ -1,18 +1,18 @@
-# CCFCRec Reproduction Artifacts
+# CCFCRec 复现实验产物清单
 
-This repository does not use ClearML or a full experiment manager. Training writes a small set of files under each dataset directory's `result/` folder, while shell logs and environment metadata must be captured by the run command.
+这个仓库没有使用 ClearML，也没有完整的实验管理器。训练脚本只会在每个数据集目录下的 `result/` 里保存少量结果文件；命令行日志、环境信息、GPU 信息需要我们用 shell 命令额外记录。
 
 ## Amazon VG
 
-### Data Location
+### 数据位置
 
-Expected server data directory:
+服务器上期望的数据目录：
 
 ```text
 /root/CCFCRec/Amazon VG/data/
 ```
 
-Required files:
+必须有这些文件：
 
 ```text
 asin.csv
@@ -24,9 +24,9 @@ train_withneg_rating.csv
 validate_rating.csv
 ```
 
-### Smoke Test
+### 连通性测试
 
-Use this to confirm data, code, CUDA, and the multi-worker data loader work:
+先用这个命令确认数据、代码、CUDA、多 worker DataLoader 都能正常跑：
 
 ```bash
 cd "/root/CCFCRec/Amazon VG"
@@ -34,11 +34,11 @@ export CCFCREC_CUDA_DEVICE=0
 /usr/bin/time -v python model.py --epoch 1 --save_batch_time 999999999 --num_workers 8 --pin_memory --persistent_workers 2>&1 | tee smoke_amazon_vg_workers8.log
 ```
 
-The smoke command does not trigger validation or checkpoint saving because `save_batch_time` is intentionally larger than the number of batches.
+这里的 `save_batch_time` 故意设得大于总 batch 数，所以这个 smoke test 不会触发验证，也不会保存 checkpoint。它只用于确认训练入口是否能跑起来，以及估算速度和资源占用。
 
-### Full Run
+### 正式训练
 
-Amazon VG has 326 batches per epoch with the default `batch_size=1024`. `save_batch_time=300` triggers validation and checkpoint saving roughly once per epoch.
+Amazon VG 默认 `batch_size=1024` 时，每个 epoch 有 326 个 batch。`save_batch_time=300` 基本会在每个 epoch 末尾触发一次验证和 checkpoint 保存。
 
 ```bash
 cd "/root/CCFCRec/Amazon VG"
@@ -46,38 +46,38 @@ export CCFCREC_CUDA_DEVICE=0
 /usr/bin/time -v python model.py --epoch 100 --save_batch_time 300 --num_workers 8 --pin_memory --persistent_workers 2>&1 | tee run_amazon_vg_workers8.log
 ```
 
-### Generated Files
+### 训练生成的文件
 
-Training creates a timestamped result directory:
+训练会创建一个带时间戳的结果目录：
 
 ```text
 /root/CCFCRec/Amazon VG/result/YYYY-MM-DD_HH_MM_SS/
 ```
 
-Expected contents:
+目录里通常会有：
 
 ```text
-readme.txt       # hyperparameters and training start time
-result.csv       # validation metrics written every save_batch_time batches
-save_dict.pkl    # item/user/category mappings needed by test.py
-1.pt, 2.pt, ...  # checkpoints saved every save_batch_time batches
+readme.txt       # 超参数、保存目录、训练开始时间
+result.csv       # 每次验证写入的 loss、HR、NDCG
+save_dict.pkl    # test.py 需要用到的 user/item/category 映射
+1.pt, 2.pt, ...  # 每次触发 save_batch_time 保存的 checkpoint
 ```
 
-### Must Download
+### 必须下载
 
-Download the run log:
+训练日志：
 
 ```text
 /root/CCFCRec/Amazon VG/run_amazon_vg_workers8.log
 ```
 
-Download the complete latest result directory:
+最新结果目录可以这样查：
 
 ```bash
 ls -td "/root/CCFCRec/Amazon VG/result/"* | head -1
 ```
 
-At minimum, preserve these files from that directory:
+建议直接下载整个最新结果目录。至少要保留这些文件：
 
 ```text
 readme.txt
@@ -86,9 +86,9 @@ save_dict.pkl
 *.pt
 ```
 
-### Recommended Metadata
+### 建议额外记录的环境信息
 
-Before or after the full run, write a small metadata file:
+正式训练前或训练后，建议写一份元信息文件，方便后面追踪复现条件：
 
 ```bash
 cd /root/CCFCRec
@@ -101,7 +101,7 @@ cd /root/CCFCRec
 } > "/root/CCFCRec/Amazon VG/run_meta_amazon_vg_workers8.txt"
 ```
 
-Download this file too:
+这个文件也要下载：
 
 ```text
 /root/CCFCRec/Amazon VG/run_meta_amazon_vg_workers8.txt
@@ -109,15 +109,15 @@ Download this file too:
 
 ## ML-20M
 
-### Data Location
+### 数据位置
 
-Expected server data directory:
+服务器上期望的数据目录：
 
 ```text
 /root/CCFCRec/ML-20M/data/
 ```
 
-Required files:
+必须有这些文件：
 
 ```text
 img_feature.csv
@@ -129,13 +129,15 @@ user_positive_movie_48.csv
 validate_rating.csv
 ```
 
-Optional cache:
+可选缓存文件：
 
 ```text
 /root/CCFCRec/ML-20M/pkl/user_pn_dict.pkl
 ```
 
-### Smoke Test
+这个缓存很小，可以省掉第一次构建用户正样本索引的时间。
+
+### 连通性测试
 
 ```bash
 cd "/root/CCFCRec/ML-20M"
@@ -143,11 +145,11 @@ export CCFCREC_CUDA_DEVICE=0
 /usr/bin/time -v python model.py --epoch 1 --save_batch_time 999999999 --num_workers 8 --pin_memory --persistent_workers 2>&1 | tee smoke_ml20m_workers8.log
 ```
 
-The smoke command does not trigger validation or checkpoint saving.
+这个 smoke test 不会触发验证，也不会保存 checkpoint。
 
-### Full Run
+### 正式训练
 
-ML-20M has 13,606 batches per epoch with the default `batch_size=1024`. The original default `save_batch_time=3000` triggers several validation/checkpoint events per epoch.
+ML-20M 默认 `batch_size=1024` 时，每个 epoch 有 13,606 个 batch。原始默认 `save_batch_time=3000`，每个 epoch 会触发多次验证和 checkpoint 保存。
 
 ```bash
 cd "/root/CCFCRec/ML-20M"
@@ -155,15 +157,15 @@ export CCFCREC_CUDA_DEVICE=0
 /usr/bin/time -v python model.py --epoch 10 --save_batch_time 3000 --num_workers 8 --pin_memory --persistent_workers 2>&1 | tee run_ml20m_workers8.log
 ```
 
-### Generated Files
+### 训练生成的文件
 
-Training creates:
+训练会创建：
 
 ```text
 /root/CCFCRec/ML-20M/result/YYYY-MM-DD_HH:MM:SS/
 ```
 
-Expected contents:
+目录里通常会有：
 
 ```text
 readme.txt
@@ -173,9 +175,7 @@ epoch_0batch_6000.pt
 ...
 ```
 
-### Must Download
-
-Download:
+### 必须下载
 
 ```text
 /root/CCFCRec/ML-20M/run_ml20m_workers8.log
@@ -184,13 +184,13 @@ Download:
 /root/CCFCRec/ML-20M/result/<timestamp>/*.pt
 ```
 
-Prefer downloading the complete latest result directory:
+更建议直接下载最新结果目录：
 
 ```bash
 ls -td "/root/CCFCRec/ML-20M/result/"* | head -1
 ```
 
-### Recommended Metadata
+### 建议额外记录的环境信息
 
 ```bash
 cd /root/CCFCRec
@@ -203,15 +203,15 @@ cd /root/CCFCRec
 } > "/root/CCFCRec/ML-20M/run_meta_ml20m_workers8.txt"
 ```
 
-Download:
+这个文件也要下载：
 
 ```text
 /root/CCFCRec/ML-20M/run_meta_ml20m_workers8.txt
 ```
 
-## Notes
+## 注意事项
 
-- Keep code and final artifacts under `/root/CCFCRec` if they need to survive instance restarts.
-- Use `/hy-tmp` only for temporary downloads, archives, and extraction work.
-- Do not keep large archives under `/root` after extraction if disk space is tight.
-- The `result/` directories are ignored by Git and must be downloaded manually.
+- 需要长期保留的代码、日志、结果目录放在 `/root/CCFCRec`。
+- `/hy-tmp` 只适合放临时下载的压缩包、临时解压目录和中转文件。
+- 根目录空间只有 30GB 左右，不要在 `/root` 长期保留大压缩包。
+- `result/` 已经被 `.gitignore` 忽略，不会通过 Git 同步，必须手动下载。
