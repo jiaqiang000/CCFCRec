@@ -29,7 +29,7 @@ def get_args():
         '--method_variant',
         type=str,
         default='baseline',
-        choices=['baseline', 'weak_q_reweight'],
+        choices=['baseline', 'weak_q_reweight', 'category_conf_input'],
         help='training method variant',
     )
     parser.add_argument('--weak_cat_threshold', type=int, default=3, help='category_count threshold for weak item reweighting')
@@ -37,6 +37,8 @@ def get_args():
     parser.add_argument('--reweight_q_bpr', action='store_true', help='reweight q_v_c-user BPR loss for weak-category items')
     parser.add_argument('--reweight_self_contrast', action='store_true', help='reweight q_v_c-item self contrast loss for weak-category items')
     parser.add_argument('--reweight_contrast', action='store_true', help='reweight q_v_c positive/negative item contrast loss for weak-category items')
+    parser.add_argument('--category_conf_dim', type=int, default=16, help='category confidence embedding dimension')
+    parser.add_argument('--category_conf_max_count', type=int, default=5, help='max category count used for confidence scalar clipping')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

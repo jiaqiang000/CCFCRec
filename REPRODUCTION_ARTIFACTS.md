@@ -58,9 +58,24 @@ export CCFCREC_CUDA_DEVICE=0
 
 ```text
 readme.txt       # 超参数、保存目录、训练开始时间
-result.csv       # 每次验证写入的 loss、HR、NDCG
+run_config.json  # 轻量结构配置，记录 method_variant、category_conf 参数、gen_layer1 输入维度、seed、workers
+result.csv       # 每次验证写入 checkpoint_index、epoch、batch、total_batches、elapsed_s、loss、contrast_sum、HR、NDCG
 save_dict.pkl    # test.py 需要用到的 user/item/category 映射
 1.pt, 2.pt, ...  # 每次触发 save_batch_time 保存的 checkpoint
+```
+
+`result.csv` 新格式说明：
+
+```text
+checkpoint_index  # 当前保存的 checkpoint 编号，对应同目录下的 <checkpoint_index>.pt
+epoch             # 当前训练轮次，从 1 开始
+batch             # 当前 epoch 内触发验证/保存时的 batch 编号
+total_batches     # 当前 epoch 的总 batch 数
+elapsed_s         # 距离上一次验证/保存经过的训练秒数，不是全局总耗时
+loss              # 当前记录点的 total_loss
+contrast_sum      # 当前记录点的 contrast_sum
+hr@5/hr@10/hr@20  # 验证集 HR 指标
+ndcg@5/ndcg@10/ndcg@20  # 验证集 NDCG 指标
 ```
 
 ### 必须下载

@@ -4,6 +4,7 @@ import sys
 import pickle
 import random
 import functools
+import json
 import torch
 import torch.utils.data
 from torch import nn
@@ -76,6 +77,22 @@ def weighted_sum(per_item_loss, weights, enabled):
     return (per_item_loss * weights).sum()
 
 
+def validate_method_args(args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    reweight_flags = [
+        getattr(args, "reweight_q_bpr", False),
+        getattr(args, "reweight_self_contrast", False),
+        getattr(args, "reweight_contrast", False),
+    ]
+    if method_variant != "weak_q_reweight" and any(reweight_flags):
+        raise ValueError("reweight flags can only be used with method_variant=weak_q_reweight")
+    if method_variant == "category_conf_input":
+        if int(getattr(args, "category_conf_dim", 16)) <= 0:
+            raise ValueError("category_conf_dim must be positive for category_conf_input")
+        if int(getattr(args, "category_conf_max_count", 5)) <= 0:
+            raise ValueError("category_conf_max_count must be positive for category_conf_input")
+
+
 def scalar_text(value):
     if hasattr(value, "detach"):
         value = value.detach()
@@ -89,6 +106,25 @@ def training_result_header():
         "checkpoint_index,epoch,batch,total_batches,elapsed_s,"
         "loss,contrast_sum,hr@5,hr@10,hr@20,ndcg@5,ndcg@10,ndcg@20\n"
     )
+
+
+def build_run_config(args, model):
+    method_variant = getattr(args, "method_variant", "baseline")
+    return {
+        "method_variant": method_variant,
+        "category_conf_dim": int(getattr(args, "category_conf_dim", 0)),
+        "category_conf_max_count": int(getattr(args, "category_conf_max_count", 0)),
+        "category_bin_count": int(getattr(model, "category_bin_count", 0)),
+        "gen_layer1_input_dim": int(model.gen_layer1.in_features),
+        "gen_layer1_output_dim": int(model.gen_layer1.out_features),
+        "seed": int(getattr(args, "seed", -1)),
+        "num_workers": int(getattr(args, "num_workers", 0)),
+    }
+
+
+def write_run_config(args, model, model_save_dir):
+    with open(os.path.join(model_save_dir, "run_config.json"), "w") as f:
+        json.dump(build_run_config(args, model), f, indent=2, sort_keys=True)
 
 
 def build_training_result_row(
@@ -128,6 +164,15 @@ class CCFCRec(nn.Module):
     def __init__(self, args):
         super(CCFCRec, self).__init__()
         self.args = args
+        self.method_variant = getattr(args, "method_variant", "baseline")
+        self.category_conf_dim = int(getattr(args, "category_conf_dim", 16))
+        self.category_conf_max_count = int(getattr(args, "category_conf_max_count", 5))
+        self.category_bin_count = 4
+        if self.uses_category_confidence():
+            if self.category_conf_dim <= 0:
+                raise ValueError("category_conf_dim must be positive for category_conf_input")
+            if self.category_conf_max_count <= 0:
+                raise ValueError("category_conf_max_count must be positive for category_conf_input")
         self.attr_matrix = torch.nn.Parameter(torch.FloatTensor(args.attr_num, args.attr_present_dim))
         # 定义属性attribute注意力层
         self.attr_W1 = torch.nn.Parameter(torch.FloatTensor(args.attr_present_dim, args.attr_present_dim))
@@ -150,10 +195,21 @@ class CCFCRec(nn.Module):
             self.user_embedding = nn.Parameter(torch.FloatTensor(args.user_number, args.implicit_dim))
             self.item_embedding = nn.Parameter(torch.FloatTensor(args.item_number, args.implicit_dim))
         # 定义生成层，将(q_v_a, u)的信息，共同生成 q_v_c， 生成包含协同信息的item嵌入
-        self.gen_layer1 = nn.Linear(args.attr_present_dim*2, args.cat_implicit_dim)
+        if self.uses_category_confidence():
+            self.category_conf_embedding = nn.Embedding(self.category_bin_count, self.category_conf_dim)
+        gen_input_dim = args.attr_present_dim + args.implicit_dim + self.category_conf_extra_dim()
+        self.gen_layer1 = nn.Linear(gen_input_dim, args.cat_implicit_dim)
         self.gen_layer2 = nn.Linear(args.attr_present_dim, args.attr_present_dim)
         # 参数初始化
         self.__init_param__()
+
+    def uses_category_confidence(self):
+        return self.method_variant == "category_conf_input"
+
+    def category_conf_extra_dim(self):
+        if self.uses_category_confidence():
+            return self.category_conf_dim + 2
+        return 0
 
     def __init_param__(self):
         nn.init.xavier_normal_(self.attr_matrix)
@@ -168,8 +224,34 @@ class CCFCRec(nn.Module):
             nn.init.xavier_normal_(self.item_embedding)
         nn.init.xavier_normal_(self.gen_layer1.weight)
         nn.init.xavier_normal_(self.gen_layer2.weight)
+        if self.uses_category_confidence():
+            nn.init.xavier_normal_(self.category_conf_embedding.weight)
 
-    def forward(self, attribute, image_feature, batch_size):
+    def build_category_conf_bins(self, attribute):
+        category_count = (attribute != -1).sum(dim=1)
+        bins = torch.zeros_like(category_count, dtype=torch.long)
+        bins = torch.where((category_count > 0) & (category_count <= 3), torch.ones_like(bins), bins)
+        bins = torch.where(category_count == 4, torch.full_like(bins, 2), bins)
+        bins = torch.where(category_count >= 5, torch.full_like(bins, 3), bins)
+        return bins
+
+    def build_category_conf_features(self, attribute):
+        category_count = (attribute != -1).sum(dim=1).float()
+        count_clamped = torch.clamp(category_count, min=0, max=self.category_conf_max_count)
+        category_density = count_clamped / float(self.category_conf_max_count)
+        category_log_norm = torch.log1p(count_clamped) / math.log1p(float(self.category_conf_max_count))
+        scalar_features = torch.stack((category_log_norm, category_density), dim=1)
+        category_bin = self.build_category_conf_bins(attribute)
+        category_conf_emb = self.category_conf_embedding(category_bin)
+        return torch.cat((category_conf_emb, scalar_features.to(category_conf_emb.dtype)), dim=1)
+
+    def build_generator_input(self, final_attr_emb, p_v, attribute):
+        if not self.uses_category_confidence():
+            return torch.cat((final_attr_emb, p_v), dim=1)
+        category_conf_features = self.build_category_conf_features(attribute)
+        return torch.cat((final_attr_emb, p_v, category_conf_features), dim=1)
+
+    def encode_content_components(self, attribute, image_feature, batch_size):
         z_v = torch.matmul(torch.matmul(self.attr_matrix, self.attr_W1)+self.attr_b1.squeeze(), self.attr_W2)
         z_v_copy = z_v.repeat(batch_size, 1, 1)
         z_v_squeeze = z_v_copy.squeeze(dim=2).to(device)
@@ -179,8 +261,12 @@ class CCFCRec(nn.Module):
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
         image_norm = torch.nn.functional.normalize(image_feature, dim=1)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
-        q_v_a = torch.cat((final_attr_emb, p_v), dim=1)
+        q_v_a = self.build_generator_input(final_attr_emb, p_v, attribute)
         q_v_c = self.gen_layer2(self.h(self.gen_layer1(q_v_a)))
+        return q_v_c, final_attr_emb, p_v
+
+    def forward(self, attribute, image_feature, batch_size):
+        q_v_c, _, _ = self.encode_content_components(attribute, image_feature, batch_size)
         return q_v_c
 
 
@@ -194,6 +280,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
         f.write(str_)
         f.write('\nsave dir:'+model_save_dir)
         f.write('\nmodel train time:'+(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
+    write_run_config(args, model, model_save_dir)
     with open(test_save_path, 'a+') as f:
         f.write(training_result_header())
     save_index = 0
@@ -301,6 +388,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
 if __name__ == '__main__':
     # args
     args = get_args()
+    validate_method_args(args)
     # result save dir
     save_dir = os.path.join(args.result_root, time.strftime('%Y-%m-%d_%H_%M_%S', time.localtime(time.time())))
     os.makedirs(save_dir, exist_ok=False)
