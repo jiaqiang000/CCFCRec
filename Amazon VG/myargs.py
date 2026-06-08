@@ -29,7 +29,13 @@ def get_args():
         '--method_variant',
         type=str,
         default='baseline',
-        choices=['baseline', 'weak_q_reweight', 'category_conf_input', 'adaptive_conf_qbpr'],
+        choices=[
+            'baseline',
+            'weak_q_reweight',
+            'category_conf_input',
+            'adaptive_conf_qbpr',
+            'category_conf_fusion_gate',
+        ],
         help='training method variant',
     )
     parser.add_argument('--weak_cat_threshold', type=int, default=3, help='category_count threshold for weak item reweighting')
@@ -39,6 +45,7 @@ def get_args():
     parser.add_argument('--reweight_contrast', action='store_true', help='reweight q_v_c positive/negative item contrast loss for weak-category items')
     parser.add_argument('--category_conf_dim', type=int, default=16, help='category confidence embedding dimension')
     parser.add_argument('--category_conf_max_count', type=int, default=5, help='max category count used for confidence scalar clipping')
+    parser.add_argument('--category_gate_scale', type=float, default=0.5, help='max residual attr/image scale shift for category confidence fusion gate')
     parser.add_argument('--adaptive_loss_alpha', type=float, default=1.0, help='extra qBPR weight scale for supported weak-category items')
     parser.add_argument('--adaptive_history_max_count', type=int, default=20, help='history length cap for adaptive support confidence')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')

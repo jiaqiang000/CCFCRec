@@ -99,11 +99,16 @@ def validate_method_args(args):
     ]
     if method_variant != "weak_q_reweight" and any(reweight_flags):
         raise ValueError("reweight flags can only be used with method_variant=weak_q_reweight")
-    if method_variant == "category_conf_input":
+    category_conf_variants = {"category_conf_input", "category_conf_fusion_gate"}
+    if method_variant in category_conf_variants:
         if int(getattr(args, "category_conf_dim", 16)) <= 0:
-            raise ValueError("category_conf_dim must be positive for category_conf_input")
+            raise ValueError("category_conf_dim must be positive for category confidence variants")
         if int(getattr(args, "category_conf_max_count", 5)) <= 0:
-            raise ValueError("category_conf_max_count must be positive for category_conf_input")
+            raise ValueError("category_conf_max_count must be positive for category confidence variants")
+    if method_variant == "category_conf_fusion_gate":
+        category_gate_scale = float(getattr(args, "category_gate_scale", 0.5))
+        if category_gate_scale <= 0 or category_gate_scale > 1:
+            raise ValueError("category_gate_scale must be in (0, 1] for category_conf_fusion_gate")
     if method_variant == "adaptive_conf_qbpr":
         if float(getattr(args, "adaptive_loss_alpha", 1.0)) <= 0:
             raise ValueError("adaptive_loss_alpha must be positive for adaptive_conf_qbpr")
@@ -133,6 +138,10 @@ def build_run_config(args, model):
         "category_conf_dim": int(getattr(args, "category_conf_dim", 0)),
         "category_conf_max_count": int(getattr(args, "category_conf_max_count", 0)),
         "category_bin_count": int(getattr(model, "category_bin_count", 0)),
+        "category_gate_scale": float(getattr(args, "category_gate_scale", 0.0)),
+        "category_fusion_gate_output_dim": int(
+            model.category_fusion_gate.out_features if hasattr(model, "category_fusion_gate") else 0
+        ),
         "gen_layer1_input_dim": int(model.gen_layer1.in_features),
         "gen_layer1_output_dim": int(model.gen_layer1.out_features),
         "weak_cat_threshold": int(getattr(args, "weak_cat_threshold", 3)),
@@ -189,12 +198,16 @@ class CCFCRec(nn.Module):
         self.method_variant = getattr(args, "method_variant", "baseline")
         self.category_conf_dim = int(getattr(args, "category_conf_dim", 16))
         self.category_conf_max_count = int(getattr(args, "category_conf_max_count", 5))
+        self.category_gate_scale = float(getattr(args, "category_gate_scale", 0.5))
         self.category_bin_count = 4
         if self.uses_category_confidence():
             if self.category_conf_dim <= 0:
-                raise ValueError("category_conf_dim must be positive for category_conf_input")
+                raise ValueError("category_conf_dim must be positive for category confidence variants")
             if self.category_conf_max_count <= 0:
-                raise ValueError("category_conf_max_count must be positive for category_conf_input")
+                raise ValueError("category_conf_max_count must be positive for category confidence variants")
+        if self.uses_category_fusion_gate():
+            if self.category_gate_scale <= 0 or self.category_gate_scale > 1:
+                raise ValueError("category_gate_scale must be in (0, 1] for category_conf_fusion_gate")
         self.attr_matrix = torch.nn.Parameter(torch.FloatTensor(args.attr_num, args.attr_present_dim))
         # 定义属性attribute注意力层
         self.attr_W1 = torch.nn.Parameter(torch.FloatTensor(args.attr_present_dim, args.attr_present_dim))
@@ -219,6 +232,8 @@ class CCFCRec(nn.Module):
         # 定义生成层，将(q_v_a, u)的信息，共同生成 q_v_c， 生成包含协同信息的item嵌入
         if self.uses_category_confidence():
             self.category_conf_embedding = nn.Embedding(self.category_bin_count, self.category_conf_dim)
+        if self.uses_category_fusion_gate():
+            self.category_fusion_gate = nn.Linear(self.category_conf_extra_dim(), 1)
         gen_input_dim = args.attr_present_dim + args.implicit_dim + self.category_conf_extra_dim()
         self.gen_layer1 = nn.Linear(gen_input_dim, args.cat_implicit_dim)
         self.gen_layer2 = nn.Linear(args.attr_present_dim, args.attr_present_dim)
@@ -226,7 +241,10 @@ class CCFCRec(nn.Module):
         self.__init_param__()
 
     def uses_category_confidence(self):
-        return self.method_variant == "category_conf_input"
+        return self.method_variant in {"category_conf_input", "category_conf_fusion_gate"}
+
+    def uses_category_fusion_gate(self):
+        return self.method_variant == "category_conf_fusion_gate"
 
     def category_conf_extra_dim(self):
         if self.uses_category_confidence():
@@ -248,6 +266,9 @@ class CCFCRec(nn.Module):
         nn.init.xavier_normal_(self.gen_layer2.weight)
         if self.uses_category_confidence():
             nn.init.xavier_normal_(self.category_conf_embedding.weight)
+        if self.uses_category_fusion_gate():
+            nn.init.zeros_(self.category_fusion_gate.weight)
+            nn.init.zeros_(self.category_fusion_gate.bias)
 
     def build_category_conf_bins(self, attribute):
         category_count = (attribute != -1).sum(dim=1)
@@ -267,10 +288,20 @@ class CCFCRec(nn.Module):
         category_conf_emb = self.category_conf_embedding(category_bin)
         return torch.cat((category_conf_emb, scalar_features.to(category_conf_emb.dtype)), dim=1)
 
+    def apply_category_fusion_gate(self, final_attr_emb, p_v, category_conf_features):
+        if not self.uses_category_fusion_gate():
+            return final_attr_emb, p_v
+        gate = torch.sigmoid(self.category_fusion_gate(category_conf_features))
+        centered_gate = (2.0 * gate) - 1.0
+        attr_scale = 1.0 + self.category_gate_scale * centered_gate
+        image_scale = 1.0 - self.category_gate_scale * centered_gate
+        return final_attr_emb * attr_scale, p_v * image_scale
+
     def build_generator_input(self, final_attr_emb, p_v, attribute):
         if not self.uses_category_confidence():
             return torch.cat((final_attr_emb, p_v), dim=1)
         category_conf_features = self.build_category_conf_features(attribute)
+        final_attr_emb, p_v = self.apply_category_fusion_gate(final_attr_emb, p_v, category_conf_features)
         return torch.cat((final_attr_emb, p_v, category_conf_features), dim=1)
 
     def encode_content_components(self, attribute, image_feature, batch_size):

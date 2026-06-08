@@ -58,7 +58,7 @@ export CCFCREC_CUDA_DEVICE=0
 
 ```text
 readme.txt       # 超参数、保存目录、训练开始时间
-run_config.json  # 轻量结构配置，记录 method_variant、category_conf 参数、gen_layer1 输入维度、seed、workers
+run_config.json  # 轻量结构配置，记录 method_variant、category_conf/category_gate 参数、gen_layer1 输入维度、seed、workers
 result.csv       # 每次验证写入 checkpoint_index、epoch、batch、total_batches、elapsed_s、loss、contrast_sum、HR、NDCG
 save_dict.pkl    # test.py 需要用到的 user/item/category 映射
 1.pt, 2.pt, ...  # 每次触发 save_batch_time 保存的 checkpoint

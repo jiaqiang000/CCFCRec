@@ -35,6 +35,7 @@ def make_args(method_variant="baseline"):
         method_variant=method_variant,
         category_conf_dim=3,
         category_conf_max_count=5,
+        category_gate_scale=0.5,
         weak_cat_threshold=3,
         weak_loss_alpha=0.5,
         adaptive_loss_alpha=1.0,
