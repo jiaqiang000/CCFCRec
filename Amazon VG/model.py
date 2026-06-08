@@ -232,11 +232,11 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
 
 
 if __name__ == '__main__':
-    # result save dir
-    save_dir = 'result/' + time.strftime('%Y-%m-%d_%H_%M_%S', time.localtime(time.time()))
-    os.makedirs(save_dir)
     # args
     args = get_args()
+    # result save dir
+    save_dir = os.path.join(args.result_root, time.strftime('%Y-%m-%d_%H_%M_%S', time.localtime(time.time())))
+    os.makedirs(save_dir, exist_ok=False)
     set_random_seed(args.seed)
     print("progress start at:", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
     train_path = "data/train_withneg_rating.csv"

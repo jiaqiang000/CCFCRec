@@ -23,6 +23,7 @@ def get_args():
     parser.add_argument('--contrast_flag', type=bool, default=True, help='contrast job flag')
     parser.add_argument('--user_flag', type=bool, default=False, help='use user to q_v_c flag')
     parser.add_argument('--save_batch_time', type=int, default=300, help='every batch time save the model')
+    parser.add_argument('--result_root', type=str, default='result', help='root directory for per-run training outputs')
     parser.add_argument('--seed', type=int, default=-1, help='random seed; negative means unset')
     parser.add_argument(
         '--method_variant',
