@@ -76,6 +76,53 @@ def weighted_sum(per_item_loss, weights, enabled):
     return (per_item_loss * weights).sum()
 
 
+def scalar_text(value):
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "item"):
+        value = value.item()
+    return str(value)
+
+
+def training_result_header():
+    return (
+        "checkpoint_index,epoch,batch,total_batches,elapsed_s,"
+        "loss,contrast_sum,hr@5,hr@10,hr@20,ndcg@5,ndcg@10,ndcg@20\n"
+    )
+
+
+def build_training_result_row(
+    checkpoint_index,
+    epoch,
+    batch,
+    total_batches,
+    elapsed_s,
+    loss,
+    contrast_sum,
+    metrics,
+):
+    values = [
+        checkpoint_index,
+        epoch,
+        batch,
+        total_batches,
+        elapsed_s,
+        scalar_text(loss),
+        scalar_text(contrast_sum),
+        *[scalar_text(metric) for metric in metrics],
+    ]
+    return ",".join(str(value) for value in values) + "\n"
+
+
+def format_training_progress(epoch, total_epochs, batch, total_batches, checkpoint_index, total_loss, elapsed_s):
+    return (
+        f"[epoch {epoch}/{total_epochs}]"
+        f"[batch {batch}/{total_batches}]"
+        f"[ckpt {checkpoint_index}] "
+        f"total_loss:{scalar_text(total_loss)}, elapsed:{elapsed_s}s"
+    )
+
+
 # CCFCRec
 class CCFCRec(nn.Module):
     def __init__(self, args):
@@ -148,8 +195,9 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
         f.write('\nsave dir:'+model_save_dir)
         f.write('\nmodel train time:'+(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
     with open(test_save_path, 'a+') as f:
-        f.write("loss,contrast_sum,hr@5,hr@10,hr@20,ndcg@5,ndcg@10,ndcg@20\n")
+        f.write(training_result_header())
     save_index = 0
+    total_batches = len(train_loader)
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
@@ -220,14 +268,33 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             i_batch += 1
             if i_batch % args.save_batch_time == 0:
                 model.eval()
-                print("[{},/13931603]total_loss:,{},{},s".format(i_batch*1024, total_loss.item(), int(time.time()-batch_time)))
+                elapsed_s = int(time.time()-batch_time)
+                checkpoint_index = save_index + 1
+                print(format_training_progress(
+                    i_epoch + 1,
+                    args.epoch,
+                    i_batch,
+                    total_batches,
+                    checkpoint_index,
+                    total_loss,
+                    elapsed_s,
+                ))
                 with torch.no_grad():
                     hr_5, hr_10, hr_20, ndcg_5, ndcg_10, ndcg_20 = valida.start_validate(model)
                 with open(test_save_path, 'a+') as f:
-                    f.write("{},{},{},{},{},{},{},{}\n".format(total_loss.item(), contrast_sum, hr_5, hr_10, hr_20, ndcg_5, ndcg_10, ndcg_20))
+                    f.write(build_training_result_row(
+                        checkpoint_index,
+                        i_epoch + 1,
+                        i_batch,
+                        total_batches,
+                        elapsed_s,
+                        total_loss,
+                        contrast_sum,
+                        (hr_5, hr_10, hr_20, ndcg_5, ndcg_10, ndcg_20),
+                    ))
                 # 保存模型
                 batch_time = time.time()
-                save_index += 1
+                save_index = checkpoint_index
                 torch.save(model.state_dict(), model_save_dir + '/' + str(save_index)+".pt")
 
 
