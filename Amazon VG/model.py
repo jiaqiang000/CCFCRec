@@ -71,6 +71,19 @@ def build_category_reweight(item_genres, args):
     return weights / weights.mean().detach()
 
 
+def build_adaptive_qbpr_weights(item_genres, support_confidence, args):
+    if getattr(args, "method_variant", "baseline") != "adaptive_conf_qbpr":
+        return None
+    if getattr(args, "adaptive_loss_alpha", 0) <= 0:
+        return None
+    category_count = (item_genres != -1).sum(dim=1).float()
+    weak_mask = category_count <= args.weak_cat_threshold
+    support_confidence = torch.clamp(support_confidence.float().to(category_count.device), min=0.0, max=1.0)
+    weights = torch.ones_like(category_count)
+    weights = weights + args.adaptive_loss_alpha * weak_mask.float() * support_confidence
+    return weights / weights.mean().detach()
+
+
 def weighted_sum(per_item_loss, weights, enabled):
     if weights is None or enabled is False:
         return per_item_loss.sum()
@@ -91,6 +104,11 @@ def validate_method_args(args):
             raise ValueError("category_conf_dim must be positive for category_conf_input")
         if int(getattr(args, "category_conf_max_count", 5)) <= 0:
             raise ValueError("category_conf_max_count must be positive for category_conf_input")
+    if method_variant == "adaptive_conf_qbpr":
+        if float(getattr(args, "adaptive_loss_alpha", 1.0)) <= 0:
+            raise ValueError("adaptive_loss_alpha must be positive for adaptive_conf_qbpr")
+        if int(getattr(args, "adaptive_history_max_count", 20)) <= 0:
+            raise ValueError("adaptive_history_max_count must be positive for adaptive_conf_qbpr")
 
 
 def scalar_text(value):
@@ -117,6 +135,10 @@ def build_run_config(args, model):
         "category_bin_count": int(getattr(model, "category_bin_count", 0)),
         "gen_layer1_input_dim": int(model.gen_layer1.in_features),
         "gen_layer1_output_dim": int(model.gen_layer1.out_features),
+        "weak_cat_threshold": int(getattr(args, "weak_cat_threshold", 3)),
+        "weak_loss_alpha": float(getattr(args, "weak_loss_alpha", 0.0)),
+        "adaptive_loss_alpha": float(getattr(args, "adaptive_loss_alpha", 0.0)),
+        "adaptive_history_max_count": int(getattr(args, "adaptive_history_max_count", 0)),
         "seed": int(getattr(args, "seed", -1)),
         "num_workers": int(getattr(args, "num_workers", 0)),
     }
@@ -288,7 +310,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
-        for user, item, item_genres, item_img_feature, neg_user, positive_item_list, negative_item_list, self_neg_list in tqdm(train_loader):
+        for user, item, item_genres, item_img_feature, neg_user, positive_item_list, negative_item_list, self_neg_list, support_confidence in tqdm(train_loader):
             optimizer.zero_grad()
             model.train()
             # allocate memory cpu to gpu
@@ -300,6 +322,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             neg_user = neg_user.to(device)
             positive_item_list = positive_item_list.to(device)
             negative_item_list = negative_item_list.to(device)
+            support_confidence = support_confidence.to(device)
             # run model
             q_v_c = model(item_genres, item_img_feature, user.shape[0])
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)
@@ -345,7 +368,11 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             y_uv2 = torch.mul(q_v_c, user_emb).sum(dim=1)
             y_kv2 = torch.mul(q_v_c, neg_user_emb).sum(dim=1)
             y_ukv2_per_item = -logsigmoid(y_uv2 - y_kv2)
-            y_ukv2 = weighted_sum(y_ukv2_per_item, category_weights, args.reweight_q_bpr)
+            adaptive_qbpr_weights = build_adaptive_qbpr_weights(item_genres, support_confidence, args)
+            if adaptive_qbpr_weights is not None:
+                y_ukv2 = weighted_sum(y_ukv2_per_item, adaptive_qbpr_weights, True)
+            else:
+                y_ukv2 = weighted_sum(y_ukv2_per_item, category_weights, args.reweight_q_bpr)
             total_loss = args.lambda1*(contrast_sum+self_contrast_sum) + (1-args.lambda1)*(y_ukv+y_ukv2)
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
@@ -408,7 +435,8 @@ if __name__ == '__main__':
         pickle.dump(save_dict, file)
     # load dataset
     dataSet = RatingDataset(train_df, img_feature_dict, asin_category_int_map, category_ser_map.__len__(),
-                            user_ser_dict, args.positive_number, args.negative_number)
+                            user_ser_dict, args.positive_number, args.negative_number,
+                            adaptive_history_max_count=args.adaptive_history_max_count)
     args.user_number = dataSet.user_number
     args.item_number = dataSet.item_number
     loader_kwargs = {

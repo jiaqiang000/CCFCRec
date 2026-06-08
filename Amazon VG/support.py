@@ -1,5 +1,6 @@
 import random
 import time
+import math
 
 from torch.utils.data import Dataset
 import sys
@@ -40,6 +41,31 @@ def sample_negative_user(user_set, interaction_user_set):
     users = set(interaction_user_set)
     candidate_users = set(user_set) - set(users)
     return random.sample(list(candidate_users), 1)[0]
+
+
+def compute_history_category_support_confidence(
+    current_item,
+    history_items,
+    item_category_sets,
+    adaptive_history_max_count=20,
+):
+    item_categories = item_category_sets.get(current_item, frozenset())
+    if len(item_categories) == 0:
+        return 0.0
+    other_history_items = [item for item in history_items if item != current_item]
+    if len(other_history_items) == 0:
+        return 0.0
+    history_categories = set()
+    for history_item in other_history_items:
+        history_categories.update(item_category_sets.get(history_item, frozenset()))
+    if len(history_categories) == 0:
+        return 0.0
+    category_overlap = len(item_categories.intersection(history_categories)) / len(item_categories)
+    history_len_conf = min(
+        math.log1p(len(other_history_items)) / math.log1p(adaptive_history_max_count),
+        1.0,
+    )
+    return float(category_overlap * history_len_conf)
 
 
 # 新建一个user-item的交互字典
@@ -95,7 +121,17 @@ def build_item_user_interaction_dict(train_csv='data/train_rating.csv',
 
 
 class RatingDataset(torch.utils.data.Dataset):
-    def __init__(self, train_csv, img_features, genres, category_num, user_serialize_dict,  positive_number, negative_number):
+    def __init__(
+        self,
+        train_csv,
+        img_features,
+        genres,
+        category_num,
+        user_serialize_dict,
+        positive_number,
+        negative_number,
+        adaptive_history_max_count=20,
+    ):
         self.train_csv = train_csv
         # 读其他内容
         self.img_feature_dict = img_features
@@ -114,10 +150,31 @@ class RatingDataset(torch.utils.data.Dataset):
         self.item_number = len(set(self.item))
         self.positive_number = positive_number
         self.negative_number = negative_number
+        self.adaptive_history_max_count = adaptive_history_max_count
         self.category_num = category_num
         self.user_item_interaction_dict = build_user_item_interaction_dict()
         self.item_user_interaction_dict = build_item_user_interaction_dict()
+        self.item_category_sets = {
+            item: frozenset(int(category) for category in categories)
+            for item, categories in self.genres_dict.items()
+        }
+        self.support_confidence_dict = self.build_support_confidence_dict()
         print("整个数据集的user个数为:", self.user_number, "train_set中的用户数目为:", len(set(self.user)))
+
+    def build_support_confidence_dict(self):
+        support_confidence_dict = {}
+        for user, item in zip(self.user, self.item):
+            key = (user, item)
+            if key in support_confidence_dict:
+                continue
+            history_items = self.user_item_interaction_dict.get(user, [])
+            support_confidence_dict[key] = compute_history_category_support_confidence(
+                current_item=item,
+                history_items=history_items,
+                item_category_sets=self.item_category_sets,
+                adaptive_history_max_count=self.adaptive_history_max_count,
+            )
+        return support_confidence_dict
 
     def __len__(self):
         return len(self.train_csv)
@@ -125,6 +182,7 @@ class RatingDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         user = self.user[index]
         item = self.item[index]
+        support_confidence = self.support_confidence_dict.get((user, item), 0.0)
         # 处理 item genres
         genres = torch.full((self.category_num, 1), -1)
         genres_index = self.genres_dict.get(item)
@@ -162,7 +220,8 @@ class RatingDataset(torch.utils.data.Dataset):
         item = self.item_serialize_dict.get(item)
         neg_user = self.user_serialize_dict.get(neg_user)
         return torch.tensor(user), torch.tensor(item), genres, torch.tensor(img_feature), torch.tensor(neg_user),\
-               torch.tensor(positive_items_list), torch.tensor(negative_item_list), torch.tensor(self_neg_list)
+               torch.tensor(positive_items_list), torch.tensor(negative_item_list), torch.tensor(self_neg_list),\
+               torch.tensor(support_confidence, dtype=torch.float32)
 
 
 # 测试数据封装
@@ -182,7 +241,7 @@ if __name__ == '__main__':
     it = dataIter.__iter__()
     for i_index in range(10):
         start = time.time()
-        u, i, g, i_f, n_user, p_list, n_list, self_n_list = it.next()
+        u, i, g, i_f, n_user, p_list, n_list, self_n_list, support_confidence = it.next()
         print("time spend:", time.time()-start)
         i_index += 1
     # print(u, i, g, i_f, n_user)
