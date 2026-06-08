@@ -2,6 +2,8 @@ import math
 import os
 import sys
 import pickle
+import random
+import functools
 import torch
 import torch.utils.data
 from torch import nn
@@ -12,6 +14,7 @@ from support import RatingDataset
 from tqdm import tqdm
 import pandas as pd
 import time
+import numpy as np
 from support import serialize_user
 from test import Validate
 from myargs import get_args, args_tostring
@@ -37,6 +40,40 @@ def resolve_device():
 device = resolve_device()
 if device.type == 'cuda':
     torch.cuda.set_device(int(os.environ.get('CCFCREC_CUDA_DEVICE', '0')))
+
+
+def set_random_seed(seed):
+    if seed is None or seed < 0:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id, base_seed):
+    worker_seed = base_seed + worker_id
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def build_category_reweight(item_genres, args):
+    if args.method_variant != 'weak_q_reweight':
+        return None
+    if args.weak_loss_alpha <= 0:
+        return None
+    category_count = (item_genres != -1).sum(dim=1).float()
+    weights = torch.ones_like(category_count)
+    weights = torch.where(category_count <= args.weak_cat_threshold, weights + args.weak_loss_alpha, weights)
+    return weights / weights.mean().detach()
+
+
+def weighted_sum(per_item_loss, weights, enabled):
+    if weights is None or enabled is False:
+        return per_item_loss.sum()
+    return (per_item_loss * weights).sum()
 
 
 # CCFCRec
@@ -145,7 +182,9 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             neg_contrast_sum = torch.sum(neg_contrast_exp, dim=2)  # shape = [1024, 10]
             contrast_val = -torch.log(pos_contrast_exp / (pos_contrast_exp + neg_contrast_sum))  # shape = [1024*10]
             contrast_examples_num = contrast_val.shape[0] * contrast_val.shape[1]
-            contrast_sum = torch.sum(torch.sum(contrast_val, dim=1), dim=0) / contrast_val.shape[1]  # 同一个batch求mean
+            contrast_per_item = torch.sum(contrast_val, dim=1) / contrast_val.shape[1]
+            category_weights = build_category_reweight(item_genres, args)
+            contrast_sum = weighted_sum(contrast_per_item, category_weights, args.reweight_contrast)
             '''
             contrast self
             '''
@@ -158,7 +197,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                     args.tau * torch.norm(q_v_c, dim=1) * torch.norm(item_emb, dim=1))
             self_pos_contrast_exp = torch.exp(self_pos_contrast_mul)  # shape = 1024*1
             self_contrast_val = -torch.log(self_pos_contrast_exp/(self_pos_contrast_exp+self_neg_contrast_sum))
-            self_contrast_sum = torch.sum(self_contrast_val)
+            self_contrast_sum = weighted_sum(self_contrast_val, category_weights, args.reweight_self_contrast)
             # rank loss
             user_emb = model.user_embedding[user]
             item_emb = model.item_embedding[item]
@@ -170,7 +209,8 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             # 使用属性生成item嵌入，再做一个bpr排序
             y_uv2 = torch.mul(q_v_c, user_emb).sum(dim=1)
             y_kv2 = torch.mul(q_v_c, neg_user_emb).sum(dim=1)
-            y_ukv2 = -logsigmoid(y_uv2 - y_kv2).sum()
+            y_ukv2_per_item = -logsigmoid(y_uv2 - y_kv2)
+            y_ukv2 = weighted_sum(y_ukv2_per_item, category_weights, args.reweight_q_bpr)
             total_loss = args.lambda1*(contrast_sum+self_contrast_sum) + (1-args.lambda1)*(y_ukv+y_ukv2)
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
@@ -197,6 +237,7 @@ if __name__ == '__main__':
     os.makedirs(save_dir)
     # args
     args = get_args()
+    set_random_seed(args.seed)
     print("progress start at:", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
     train_path = "data/train_withneg_rating.csv"
     vliad_path = 'data/validate_rating.csv'
@@ -227,6 +268,11 @@ if __name__ == '__main__':
         loader_kwargs['prefetch_factor'] = args.prefetch_factor
         if args.multiprocessing_context:
             loader_kwargs['multiprocessing_context'] = args.multiprocessing_context
+    if args.seed >= 0:
+        generator = torch.Generator()
+        generator.manual_seed(args.seed)
+        loader_kwargs['generator'] = generator
+        loader_kwargs['worker_init_fn'] = functools.partial(seed_worker, base_seed=args.seed)
     train_loader = torch.utils.data.DataLoader(dataSet, **loader_kwargs)
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)

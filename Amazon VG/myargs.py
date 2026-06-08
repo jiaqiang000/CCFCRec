@@ -23,6 +23,19 @@ def get_args():
     parser.add_argument('--contrast_flag', type=bool, default=True, help='contrast job flag')
     parser.add_argument('--user_flag', type=bool, default=False, help='use user to q_v_c flag')
     parser.add_argument('--save_batch_time', type=int, default=300, help='every batch time save the model')
+    parser.add_argument('--seed', type=int, default=-1, help='random seed; negative means unset')
+    parser.add_argument(
+        '--method_variant',
+        type=str,
+        default='baseline',
+        choices=['baseline', 'weak_q_reweight'],
+        help='training method variant',
+    )
+    parser.add_argument('--weak_cat_threshold', type=int, default=3, help='category_count threshold for weak item reweighting')
+    parser.add_argument('--weak_loss_alpha', type=float, default=0.5, help='extra loss weight for weak-category items')
+    parser.add_argument('--reweight_q_bpr', action='store_true', help='reweight q_v_c-user BPR loss for weak-category items')
+    parser.add_argument('--reweight_self_contrast', action='store_true', help='reweight q_v_c-item self contrast loss for weak-category items')
+    parser.add_argument('--reweight_contrast', action='store_true', help='reweight q_v_c positive/negative item contrast loss for weak-category items')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')
