@@ -17,10 +17,11 @@ export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SEED="${SEED:-43}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
-NUM_WORKERS="${NUM_WORKERS:-45}"
+NUM_WORKERS="${NUM_WORKERS:-8}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 SAVE_BATCH_TIME="${SAVE_BATCH_TIME:-300}"
 RESULT_ROOT="${RESULT_ROOT:-/hy-tmp/ccfcrec_result}"
+VALIDATE_BATCH_SIZE="${VALIDATE_BATCH_SIZE:-512}"
 
 "${PYTHON_BIN}" model.py \
   --seed "${SEED}" \
@@ -31,4 +32,5 @@ RESULT_ROOT="${RESULT_ROOT:-/hy-tmp/ccfcrec_result}"
   --prefetch_factor "${PREFETCH_FACTOR}" \
   --save_batch_time "${SAVE_BATCH_TIME}" \
   --result_root "${RESULT_ROOT}" \
+  --validate_batch_size "${VALIDATE_BATCH_SIZE}" \
   "$@"

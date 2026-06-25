@@ -339,21 +339,24 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
     total_batches = len(train_loader)
     model = model.to(device)
     non_blocking = device.type == 'cuda' and getattr(args, 'pin_memory', False)
+    item_category_tensor = train_loader.dataset.item_category_tensor.to(device, non_blocking=non_blocking)
+    item_image_feature_tensor = train_loader.dataset.item_image_feature_tensor.to(device, non_blocking=non_blocking)
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
-        for user, item, item_genres, item_img_feature, neg_user, positive_item_list, negative_item_list, self_neg_list, support_confidence in tqdm(train_loader):
+        for user, item, neg_user, positive_item_list, negative_item_list, self_neg_list, support_confidence in tqdm(train_loader):
             optimizer.zero_grad()
             model.train()
             # allocate memory cpu to gpu
             user = user.to(device, non_blocking=non_blocking)
             item = item.to(device, non_blocking=non_blocking)
-            item_genres = item_genres.to(device, non_blocking=non_blocking)
-            item_img_feature = item_img_feature.to(device, non_blocking=non_blocking)
             neg_user = neg_user.to(device, non_blocking=non_blocking)
             positive_item_list = positive_item_list.to(device, non_blocking=non_blocking)
             negative_item_list = negative_item_list.to(device, non_blocking=non_blocking)
+            self_neg_list = self_neg_list.to(device, non_blocking=non_blocking)
             support_confidence = support_confidence.to(device, non_blocking=non_blocking)
+            item_genres = item_category_tensor[item]
+            item_img_feature = item_image_feature_tensor[item]
             # run model
             q_v_c = model(item_genres, item_img_feature, user.shape[0])
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)
@@ -492,5 +495,6 @@ if __name__ == '__main__':
     myModel = CCFCRec(args)
     optimizer = torch.optim.Adam(myModel.parameters(), lr=args.learning_rate, weight_decay=0.1)
     validator = Validate(validate_csv=vliad_path, user_serialize_dict=user_ser_dict, img=img_feature_dict,
-                         genres=asin_category_int_map, category_num=category_ser_map.__len__())
+                         genres=asin_category_int_map, category_num=category_ser_map.__len__(),
+                         batch_size=args.validate_batch_size)
     train(myModel, train_loader, optimizer, validator, args, save_dir)

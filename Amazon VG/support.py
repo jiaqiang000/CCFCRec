@@ -91,6 +91,46 @@ def sample_negative_serial_items(item_number, excluded_items, sample_size, rng=n
     return samples
 
 
+def build_item_feature_tensors(item_serialize_dict, img_features, genres, category_num):
+    if not item_serialize_dict:
+        raise ValueError("item_serialize_dict must not be empty")
+    if category_num <= 0:
+        raise ValueError("category_num must be positive")
+
+    item_count = len(item_serialize_dict)
+    ordered_items = sorted(item_serialize_dict.items(), key=lambda item_pair: item_pair[1])
+    first_item = ordered_items[0][0]
+    if first_item not in img_features:
+        raise KeyError(f"missing image feature for item {first_item}")
+    first_image = torch.as_tensor(img_features[first_item], dtype=torch.float32)
+    if first_image.ndim != 1:
+        raise ValueError("image features must be one-dimensional")
+
+    category_tensor = torch.full((item_count, category_num), -1, dtype=torch.int8)
+    image_tensor = torch.empty((item_count, first_image.numel()), dtype=torch.float32)
+
+    for raw_item, serial_item in ordered_items:
+        if serial_item < 0 or serial_item >= item_count:
+            raise ValueError(f"serialized item id out of range for item {raw_item}: {serial_item}")
+        image_feature = img_features.get(raw_item)
+        if image_feature is None:
+            raise KeyError(f"missing image feature for item {raw_item}")
+        image_feature = torch.as_tensor(image_feature, dtype=torch.float32)
+        if image_feature.ndim != 1 or image_feature.numel() != first_image.numel():
+            raise ValueError(f"inconsistent image feature shape for item {raw_item}")
+        image_tensor[serial_item] = image_feature
+
+        genre_indices = genres.get(raw_item)
+        if genre_indices is None:
+            continue
+        genre_indices = torch.as_tensor(list(genre_indices), dtype=torch.long)
+        if genre_indices.numel() == 0:
+            continue
+        category_tensor[serial_item, genre_indices] = 1
+
+    return category_tensor, image_tensor
+
+
 def compute_history_category_support_confidence(
     current_item,
     history_items,
@@ -232,6 +272,12 @@ class RatingDataset(torch.utils.data.Dataset):
                 continue
             self.user_positive_serial_items[user] = serial_items
             self.user_positive_serial_sets[user] = set(serial_items.tolist())
+        self.item_category_tensor, self.item_image_feature_tensor = build_item_feature_tensors(
+            item_serialize_dict=self.item_serialize_dict,
+            img_features=self.img_feature_dict,
+            genres=self.genres_dict,
+            category_num=self.category_num,
+        )
         self.item_category_sets = {
             item: frozenset(int(category) for category in categories)
             for item, categories in self.genres_dict.items()
@@ -261,12 +307,6 @@ class RatingDataset(torch.utils.data.Dataset):
         user = self.user_values[index]
         item = self.item_values[index]
         support_confidence = self.support_confidence_dict.get((user, item), 0.0)
-        # 处理 item genres
-        genres = torch.full((self.category_num,), -1)
-        genres_index = self.genres_dict.get(item)
-        genres[genres_index] = 1
-        # 处理 item feature
-        img_feature = self.img_feature_dict.get(item)
         # --------------------- #
         #  处理 positive items   #
         #  runtime sampling     #
@@ -292,8 +332,8 @@ class RatingDataset(torch.utils.data.Dataset):
         user = self.serialized_user_values[index]
         item = self.serialized_item_values[index]
         neg_user = self.serialized_neg_user_values[index]
-        return torch.as_tensor(user, dtype=torch.long), torch.as_tensor(item, dtype=torch.long), genres,\
-               torch.as_tensor(img_feature, dtype=torch.float32), torch.as_tensor(neg_user, dtype=torch.long),\
+        return torch.as_tensor(user, dtype=torch.long), torch.as_tensor(item, dtype=torch.long),\
+               torch.as_tensor(neg_user, dtype=torch.long),\
                torch.as_tensor(positive_items_list, dtype=torch.long), torch.as_tensor(negative_item_list, dtype=torch.long),\
                torch.as_tensor(self_neg_list, dtype=torch.long),\
                torch.tensor(support_confidence, dtype=torch.float32)

@@ -53,6 +53,7 @@ def get_args():
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')
     parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch factor when num_workers > 0')
     parser.add_argument('--multiprocessing_context', type=str, default='', help='DataLoader multiprocessing context, e.g. fork on macOS')
+    parser.add_argument('--validate_batch_size', type=int, default=512, help='validation item batch size')
     args = parser.parse_args()
     return args
 

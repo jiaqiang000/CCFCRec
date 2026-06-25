@@ -7,6 +7,7 @@ import time
 import os
 from myargs import get_args
 from tqdm import tqdm
+from support import build_item_feature_tensors
 
 
 def resolve_device():
@@ -41,13 +42,20 @@ def get_random_user_rank_list(model, genres, image_feature, k):
 
 
 def get_similar_user_speed(model, genres, image_feature, k):
-    genres = genres.unsqueeze(dim=0)
-    img_feature = image_feature.unsqueeze(dim=0)
-    q_v_c = model(genres, img_feature, 1)
+    return get_similar_user_batch(
+        model,
+        genres.unsqueeze(dim=0),
+        image_feature.unsqueeze(dim=0),
+        k,
+    )[0]
+
+
+def get_similar_user_batch(model, genres, image_feature, k):
+    q_v_c = model(genres, image_feature, genres.shape[0])
     user_emb = model.user_embedding
-    ratings = torch.mul(user_emb, q_v_c).sum(dim=1)
-    top_k = min(k, ratings.shape[0])
-    index = torch.topk(ratings, k=top_k).indices
+    ratings = torch.matmul(q_v_c, user_emb.t())
+    top_k = min(k, ratings.shape[1])
+    index = torch.topk(ratings, k=top_k, dim=1).indices
     return index.cpu().detach().numpy().tolist()
 
 
@@ -82,49 +90,54 @@ def ndcg_k(item, recommend_users, item_user_dict, k):
 
 
 class Validate:
-    def __init__(self, validate_csv, user_serialize_dict, img, genres, category_num):
+    def __init__(self, validate_csv, user_serialize_dict, img, genres, category_num, batch_size=512):
         print("validate class init")
         validate_csv = pd.read_csv(validate_csv)
-        self.item = set(validate_csv['asin'])
+        self.items = list(dict.fromkeys(validate_csv['asin']))
+        self.item = set(self.items)
         self.item_user_dict = {}
         # 构建完成 item->user dict
-        for it in self.item:
-            users = validate_csv[validate_csv['asin'] == it]['reviewerID']
+        for it, item_df in validate_csv.groupby('asin'):
+            users = item_df['reviewerID']
             users = [user_serialize_dict.get(u) for u in users]
             self.item_user_dict[it] = users
         self.img_dict = img
         self.genres_dict = genres
         self.category_num = category_num
+        self.batch_size = batch_size
+        item_serialize_dict = {item: item_idx for item_idx, item in enumerate(self.items)}
+        self.item_category_tensor, self.item_image_feature_tensor = build_item_feature_tensors(
+            item_serialize_dict=item_serialize_dict,
+            img_features=self.img_dict,
+            genres=self.genres_dict,
+            category_num=self.category_num,
+        )
 
     def start_validate(self, model):
         # 开始评估
         hr_hit_cnt_5, hr_hit_cnt_10, hr_hit_cnt_20 = 0, 0, 0
         ndcg_sum_5, ndcg_sum_10, ndcg_sum_20 = 0.0, 0.0, 0.0
         max_k = 20
-        it_idx = 0
         model = model.to(device)
-        for it in self.item:
-            # 输出
-            # 处理 item genres
-            genres = torch.full((self.category_num,), -1)
-            genres_index = self.genres_dict.get(it)
-            genres[genres_index] = 1
-            image_feature = self.img_dict.get(it)
-            genres = genres.to(device)
-            image_feature = torch.as_tensor(image_feature, dtype=torch.float32).to(device)
+        item_category_tensor = self.item_category_tensor.to(device)
+        item_image_feature_tensor = self.item_image_feature_tensor.to(device)
+        for batch_start in range(0, len(self.items), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(self.items))
+            batch_items = self.items[batch_start:batch_end]
+            genres = item_category_tensor[batch_start:batch_end]
+            image_feature = item_image_feature_tensor[batch_start:batch_end]
             with torch.no_grad():
-                recommend_users = get_similar_user_speed(model, genres, image_feature, max_k)
-            # 计算hr指标
-            hr_hit_cnt_5 += hr_at_k(it, recommend_users, self.item_user_dict, 5)
-            hr_hit_cnt_10 += hr_at_k(it, recommend_users, self.item_user_dict, 10)
-            hr_hit_cnt_20 += hr_at_k(it, recommend_users, self.item_user_dict, 20)
-            # 计算NDCG指标
-            ndcg_sum_5 += ndcg_k(it, recommend_users, self.item_user_dict, 5)
-            ndcg_sum_10 += ndcg_k(it, recommend_users, self.item_user_dict, 10)
-            ndcg_sum_20 += ndcg_k(it, recommend_users, self.item_user_dict, 20)
-            # print("评估进度:", it_idx, "/", len(item))
-            it_idx += 1
-        item_len = len(self.item)
+                recommend_user_batches = get_similar_user_batch(model, genres, image_feature, max_k)
+            for it, recommend_users in zip(batch_items, recommend_user_batches):
+                # 计算hr指标
+                hr_hit_cnt_5 += hr_at_k(it, recommend_users, self.item_user_dict, 5)
+                hr_hit_cnt_10 += hr_at_k(it, recommend_users, self.item_user_dict, 10)
+                hr_hit_cnt_20 += hr_at_k(it, recommend_users, self.item_user_dict, 20)
+                # 计算NDCG指标
+                ndcg_sum_5 += ndcg_k(it, recommend_users, self.item_user_dict, 5)
+                ndcg_sum_10 += ndcg_k(it, recommend_users, self.item_user_dict, 10)
+                ndcg_sum_20 += ndcg_k(it, recommend_users, self.item_user_dict, 20)
+        item_len = len(self.items)
         hr_5 = hr_hit_cnt_5 / (item_len * 5)
         hr_10 = hr_hit_cnt_10 / (item_len * 10)
         hr_20 = hr_hit_cnt_20 / (item_len * 20)
