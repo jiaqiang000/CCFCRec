@@ -43,6 +43,54 @@ def sample_negative_user(user_set, interaction_user_set):
     return random.sample(list(candidate_users), 1)[0]
 
 
+def _rng_integers(rng, high, size):
+    if hasattr(rng, "integers"):
+        return rng.integers(0, high, size=size)
+    return rng.randint(0, high, size=size)
+
+
+def sample_negative_serial_items(item_number, excluded_items, sample_size, rng=np.random):
+    if sample_size < 0:
+        raise ValueError("sample_size must be non-negative")
+    if item_number <= 0:
+        raise ValueError("item_number must be positive")
+    if sample_size == 0:
+        return np.empty(0, dtype=np.int64)
+
+    excluded_set = {
+        int(item)
+        for item in excluded_items
+        if 0 <= int(item) < item_number
+    }
+    candidate_count = item_number - len(excluded_set)
+    if candidate_count <= 0:
+        raise ValueError("no negative item candidate exists")
+
+    if candidate_count < item_number * 0.2:
+        candidates = np.fromiter(
+            (item for item in range(item_number) if item not in excluded_set),
+            dtype=np.int64,
+        )
+        candidate_indices = _rng_integers(rng, len(candidates), sample_size)
+        return candidates[candidate_indices]
+
+    samples = np.empty(sample_size, dtype=np.int64)
+    filled = 0
+    draw_size = max(sample_size, 64)
+    while filled < sample_size:
+        draw = _rng_integers(rng, item_number, draw_size)
+        if excluded_set:
+            draw = np.fromiter(
+                (int(item) for item in draw if int(item) not in excluded_set),
+                dtype=np.int64,
+            )
+        take = min(sample_size - filled, len(draw))
+        if take > 0:
+            samples[filled:filled + take] = draw[:take]
+            filled += take
+    return samples
+
+
 def compute_history_category_support_confidence(
     current_item,
     history_items,
@@ -147,13 +195,43 @@ class RatingDataset(torch.utils.data.Dataset):
         self.item_serialize_dict = serialize_item(self.item)
         # 返回个数时，返回全集的user数和训练集的item数
         self.user_number = len(user_serialize_dict)
-        self.item_number = len(set(self.item))
+        self.item_number = len(self.item_serialize_dict)
         self.positive_number = positive_number
         self.negative_number = negative_number
         self.adaptive_history_max_count = adaptive_history_max_count
         self.category_num = category_num
         self.user_item_interaction_dict = build_user_item_interaction_dict()
         self.item_user_interaction_dict = build_item_user_interaction_dict()
+        self.user_values = self.user.to_numpy()
+        self.item_values = self.item.to_numpy()
+        self.neg_user_values = self.neg_user.to_numpy()
+        self.serialized_user_values = np.asarray(
+            [self.user_serialize_dict.get(user) for user in self.user_values],
+            dtype=np.int64,
+        )
+        self.serialized_item_values = np.asarray(
+            [self.item_serialize_dict.get(item) for item in self.item_values],
+            dtype=np.int64,
+        )
+        self.serialized_neg_user_values = np.asarray(
+            [self.user_serialize_dict.get(user) for user in self.neg_user_values],
+            dtype=np.int64,
+        )
+        self.user_positive_serial_items = {}
+        self.user_positive_serial_sets = {}
+        for user, items in self.user_item_interaction_dict.items():
+            serial_items = np.asarray(
+                [
+                    self.item_serialize_dict[item]
+                    for item in items
+                    if item in self.item_serialize_dict
+                ],
+                dtype=np.int64,
+            )
+            if len(serial_items) == 0:
+                continue
+            self.user_positive_serial_items[user] = serial_items
+            self.user_positive_serial_sets[user] = set(serial_items.tolist())
         self.item_category_sets = {
             item: frozenset(int(category) for category in categories)
             for item, categories in self.genres_dict.items()
@@ -180,47 +258,44 @@ class RatingDataset(torch.utils.data.Dataset):
         return len(self.train_csv)
 
     def __getitem__(self, index):
-        user = self.user[index]
-        item = self.item[index]
+        user = self.user_values[index]
+        item = self.item_values[index]
         support_confidence = self.support_confidence_dict.get((user, item), 0.0)
         # 处理 item genres
-        genres = torch.full((self.category_num, 1), -1)
+        genres = torch.full((self.category_num,), -1)
         genres_index = self.genres_dict.get(item)
         genres[genres_index] = 1
-        genres = genres.squeeze(dim=1)
         # 处理 item feature
         img_feature = self.img_feature_dict.get(item)
-        get_item_start = time.time()
-        # sample neg user spend a lot time.
-        interaction_user_set = self.item_user_interaction_dict.get(item)
-        # neg_user = sample_negative_user(self.user, interaction_user_set)
-        neg_user = self.neg_user[index]
-        # print('sample neg user:', time.time()-get_item_start)
         # --------------------- #
         #  处理 positive items   #
         #  runtime sampling     #
         # --------------------- #
-        positive_items_ = self.user_item_interaction_dict.get(user)
-        positive_items = list(np.random.choice(list(positive_items_), self.positive_number, replace=True))
-        positive_items_list = [self.item_serialize_dict.get(item) for item in positive_items]
+        positive_items_ = self.user_positive_serial_items.get(user)
+        if positive_items_ is None:
+            positive_items_ = np.asarray([self.serialized_item_values[index]], dtype=np.int64)
+        positive_items_list = np.random.choice(positive_items_, self.positive_number, replace=True)
         # runtime sampling negative
-        negative_item_list = []
-        neg_item_set = list(self.item_set - set(positive_items_))
-        # merge multi negative sample result
-        negative_items_ = list(np.random.choice(neg_item_set, self.negative_number*(self.positive_number+1), replace=True))
-        negative_items_ = [self.item_serialize_dict.get(it) for it in negative_items_]
-        for i in range(self.positive_number):
-            start_idx = self.negative_number*i
-            end_idx = self.negative_number*(i+1)
-            negative_item_list.append(negative_items_[start_idx:end_idx])
+        positive_item_set = self.user_positive_serial_sets.get(user, set(positive_items_.tolist()))
+        negative_items_ = sample_negative_serial_items(
+            self.item_number,
+            positive_item_set,
+            self.negative_number*(self.positive_number+1),
+        )
+        negative_item_list = negative_items_[:self.negative_number*self.positive_number].reshape(
+            self.positive_number,
+            self.negative_number,
+        )
         # self neg list 完成 序列化, self的抽样放在和collaborative items中一起抽样负例子，最后分割出来就行了
         self_neg_list = negative_items_[self.positive_number*self.negative_number:]
         # serialize
-        user = self.user_serialize_dict.get(user)
-        item = self.item_serialize_dict.get(item)
-        neg_user = self.user_serialize_dict.get(neg_user)
-        return torch.tensor(user), torch.tensor(item), genres, torch.tensor(img_feature), torch.tensor(neg_user),\
-               torch.tensor(positive_items_list), torch.tensor(negative_item_list), torch.tensor(self_neg_list),\
+        user = self.serialized_user_values[index]
+        item = self.serialized_item_values[index]
+        neg_user = self.serialized_neg_user_values[index]
+        return torch.as_tensor(user, dtype=torch.long), torch.as_tensor(item, dtype=torch.long), genres,\
+               torch.as_tensor(img_feature, dtype=torch.float32), torch.as_tensor(neg_user, dtype=torch.long),\
+               torch.as_tensor(positive_items_list, dtype=torch.long), torch.as_tensor(negative_item_list, dtype=torch.long),\
+               torch.as_tensor(self_neg_list, dtype=torch.long),\
                torch.tensor(support_confidence, dtype=torch.float32)
 
 

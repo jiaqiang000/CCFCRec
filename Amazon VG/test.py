@@ -46,8 +46,9 @@ def get_similar_user_speed(model, genres, image_feature, k):
     q_v_c = model(genres, img_feature, 1)
     user_emb = model.user_embedding
     ratings = torch.mul(user_emb, q_v_c).sum(dim=1)
-    index = torch.argsort(-ratings)
-    return index[0:k].cpu().detach().numpy().tolist()
+    top_k = min(k, ratings.shape[0])
+    index = torch.topk(ratings, k=top_k).indices
+    return index.cpu().detach().numpy().tolist()
 
 
 def hr_at_k(item, recommend_users, item_user_dict, k):
@@ -101,19 +102,16 @@ class Validate:
         ndcg_sum_5, ndcg_sum_10, ndcg_sum_20 = 0.0, 0.0, 0.0
         max_k = 20
         it_idx = 0
+        model = model.to(device)
         for it in self.item:
             # 输出
-            model = model.to(device)  # move to cpu
             # 处理 item genres
-            genres = torch.full((self.category_num, 1), -1)
+            genres = torch.full((self.category_num,), -1)
             genres_index = self.genres_dict.get(it)
             genres[genres_index] = 1
-            genres = genres.squeeze(dim=1)
-            genres = torch.tensor(genres)
             image_feature = self.img_dict.get(it)
-            image_feature = torch.tensor(image_feature)
             genres = genres.to(device)
-            image_feature = image_feature.to(device)
+            image_feature = torch.as_tensor(image_feature, dtype=torch.float32).to(device)
             with torch.no_grad():
                 recommend_users = get_similar_user_speed(model, genres, image_feature, max_k)
             # 计算hr指标

@@ -307,12 +307,11 @@ class CCFCRec(nn.Module):
     def encode_content_components(self, attribute, image_feature, batch_size):
         z_v = torch.matmul(torch.matmul(self.attr_matrix, self.attr_W1)+self.attr_b1.squeeze(), self.attr_W2)
         z_v_copy = z_v.repeat(batch_size, 1, 1)
-        z_v_squeeze = z_v_copy.squeeze(dim=2).to(device)
-        neg_inf = torch.full(z_v_squeeze.shape, -1e6).to(device)
+        z_v_squeeze = z_v_copy.squeeze(dim=2)
+        neg_inf = torch.full_like(z_v_squeeze, -1e6)
         z_v_mask = torch.where(attribute != -1, z_v_squeeze, neg_inf)
         attr_attention_weight = torch.softmax(z_v_mask, dim=1)
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
-        image_norm = torch.nn.functional.normalize(image_feature, dim=1)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
         q_v_a = self.build_generator_input(final_attr_emb, p_v, attribute)
         q_v_c = self.gen_layer2(self.h(self.gen_layer1(q_v_a)))
@@ -338,6 +337,8 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
         f.write(training_result_header())
     save_index = 0
     total_batches = len(train_loader)
+    model = model.to(device)
+    non_blocking = device.type == 'cuda' and getattr(args, 'pin_memory', False)
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
@@ -345,15 +346,14 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             optimizer.zero_grad()
             model.train()
             # allocate memory cpu to gpu
-            model = model.to(device)
-            user = user.to(device)
-            item = item.to(device)
-            item_genres = item_genres.to(device)
-            item_img_feature = item_img_feature.to(device)
-            neg_user = neg_user.to(device)
-            positive_item_list = positive_item_list.to(device)
-            negative_item_list = negative_item_list.to(device)
-            support_confidence = support_confidence.to(device)
+            user = user.to(device, non_blocking=non_blocking)
+            item = item.to(device, non_blocking=non_blocking)
+            item_genres = item_genres.to(device, non_blocking=non_blocking)
+            item_img_feature = item_img_feature.to(device, non_blocking=non_blocking)
+            neg_user = neg_user.to(device, non_blocking=non_blocking)
+            positive_item_list = positive_item_list.to(device, non_blocking=non_blocking)
+            negative_item_list = negative_item_list.to(device, non_blocking=non_blocking)
+            support_confidence = support_confidence.to(device, non_blocking=non_blocking)
             # run model
             q_v_c = model(item_genres, item_img_feature, user.shape[0])
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)

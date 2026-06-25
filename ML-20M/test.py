@@ -31,11 +31,8 @@ if device.type == 'cuda':
 
 
 def get_similar_user_speed(model, genres, img, k):
-    user_embedding = model.user_embedding
-    user_idx = torch.tensor(list(range(user_embedding.shape[0])))
-    user_idx = user_idx.to(device)
     # [138493*64]
-    user_emb = user_embedding[user_idx]
+    user_emb = model.user_embedding
     genres = genres.unsqueeze(dim=0)
     img = img.unsqueeze(dim=0)
     # 输入到模型中
@@ -47,8 +44,9 @@ def get_similar_user_speed(model, genres, img, k):
     q_v_a = torch.cat((z_v.unsqueeze(dim=0), p_v), dim=1)
     q_v_c = model.gen_layer2(model.h(model.gen_layer1(q_v_a)))
     ratings = torch.mul(user_emb, q_v_c).sum(dim=1)
-    index = torch.argsort(-ratings)
-    return index[0:k].cpu().detach().numpy().tolist()
+    top_k = min(k, ratings.shape[0])
+    index = torch.topk(ratings, k=top_k).indices
+    return index.cpu().detach().numpy().tolist()
 
 
 def hr_at_k(item, recommend_users, item_user_dict, k):
@@ -101,11 +99,11 @@ class Validate:
         ndcg_sum_5, ndcg_sum_10, ndcg_sum_20 = 0.0, 0.0, 0.0
         max_k = 20
         it_idx = 0
+        model = model.to(device)
         for it in self.item:
             # 输出
-            model = model.to(device)  # move to cpu
-            genres = torch.tensor(self.genres_dict.get(it))
-            img_feature = torch.tensor(self.img_dict.get(it))
+            genres = torch.as_tensor(self.genres_dict.get(it), dtype=torch.long)
+            img_feature = torch.as_tensor(self.img_dict.get(it), dtype=torch.float32)
             genres = genres.to(device)
             img_feature = img_feature.to(device)
             with torch.no_grad():

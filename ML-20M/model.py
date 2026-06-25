@@ -109,6 +109,8 @@ def train(model, train_loader, optimizer, valida, args):
         f.write('\nmodel train time:'+(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
     with open(test_save_path, 'a+') as f:
         f.write("loss,contrast_loss,self_contrast_loss,p@5,p@10,p@20,ndcg@5,ndcg@10,ndcg@20\n")
+    model = model.to(device)
+    non_blocking = device.type == 'cuda' and getattr(args, 'pin_memory', False)
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
@@ -116,14 +118,13 @@ def train(model, train_loader, optimizer, valida, args):
             optimizer.zero_grad()
             model.train()
             # allocate memory cpu to gpu
-            model = model.to(device)
-            user = user.to(device)
-            item = item.to(device)
-            item_genres = item_genres.to(device)
-            item_img_feature = item_img_feature.to(device)
-            neg_user = neg_user.to(device)
-            positive_item_list = positive_item_list.to(device)
-            negative_item_list = negative_item_list.to(device)
+            user = user.to(device, non_blocking=non_blocking)
+            item = item.to(device, non_blocking=non_blocking)
+            item_genres = item_genres.to(device, non_blocking=non_blocking)
+            item_img_feature = item_img_feature.to(device, non_blocking=non_blocking)
+            neg_user = neg_user.to(device, non_blocking=non_blocking)
+            positive_item_list = positive_item_list.to(device, non_blocking=non_blocking)
+            negative_item_list = negative_item_list.to(device, non_blocking=non_blocking)
             q_v_c = model(item_genres, item_img_feature, user)
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)
             # 计算对比损失

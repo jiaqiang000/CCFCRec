@@ -99,18 +99,43 @@ class RatingDataset(torch.utils.data.Dataset):
         self.item_serialize_dict = serialize_item(self.item)
         # 返回个数时，返回全集的user数和训练集的item数
         self.user_number = len(user_serialize_dict)
-        self.item_number = len(set(self.item))
+        self.item_number = len(self.item_serialize_dict)
         self.positive_number = positive_number
         self.negative_number = negative_number
+        self.user_values = self.user.to_numpy()
+        self.item_values = self.item.to_numpy()
+        self.neg_user_values = self.neg_user.to_numpy()
+        self.serialized_user_values = np.asarray(
+            [self.user_serialize_dict.get(user) for user in self.user_values],
+            dtype=np.int64,
+        )
+        self.serialized_item_values = np.asarray(
+            [self.item_serialize_dict.get(item) for item in self.item_values],
+            dtype=np.int64,
+        )
+        self.serialized_neg_user_values = np.asarray(
+            [self.user_serialize_dict.get(user) for user in self.neg_user_values],
+            dtype=np.int64,
+        )
+        self.user_pos_positive_values = self.user_pos_neg_movie_df['positive_movies'].to_numpy()
+        self.user_pos_negative_values = self.user_pos_neg_movie_df['negative_movies'].to_numpy()
+        self.self_negative_values = self.item_pn_df['negative_movies'].to_numpy()
         print("整个数据集的user个数为:", self.user_number, "train_set中的用户数目为:", len(set(self.user)))
 
     def __len__(self):
         return len(self.train_csv)
 
+    def sample_serial_negatives_from_text(self, negative_movies):
+        negative_items = np.fromstring(negative_movies[1:-1], sep=",", dtype=np.int64)
+        negative_serial_items = np.asarray(
+            [self.item_serialize_dict.get(item) for item in negative_items],
+            dtype=np.int64,
+        )
+        return np.random.choice(negative_serial_items, self.negative_number, replace=True)
+
     def __getitem__(self, index):
-        user = self.user[index]
-        item = self.item[index]
-        neg_user = self.neg_user[index]
+        user = self.user_values[index]
+        item = self.item_values[index]
         # 处理 item genres
         genres = self.genres_dict.get(item)
         # 处理 item feature
@@ -118,30 +143,25 @@ class RatingDataset(torch.utils.data.Dataset):
         # 处理 positive items
         # 直接存储df的位置，user -> 从哪里到哪里
         position_arr = self.user_position_dict.get(user)
-        positive_segment = self.user_pos_neg_movie_df.loc[position_arr[0]: position_arr[1]]
-        positive_movie_df = pd.DataFrame.sample(positive_segment, n=self.positive_number, replace=True)
-        positive_movie_list = list(positive_movie_df['positive_movies'])
-        negative_movie_list = positive_movie_df['negative_movies']
-        self_negative_list = self.item_pn_df['negative_movies'][index]
+        positive_indices = np.random.randint(position_arr[0], position_arr[1] + 1, size=self.positive_number)
+        positive_movie_list = self.user_pos_positive_values[positive_indices]
+        negative_movie_list = self.user_pos_negative_values[positive_indices]
+        self_negative_list = self.self_negative_values[index]
         # self neg list 完成 序列化
-        tmp_neg_list = list(map(int, self_negative_list[1:-1].split(",")))
-        tmp_neg_ser_list = [self.item_serialize_dict.get(item) for item in tmp_neg_list]
-        # 插入一条抽样
-        self_neg_list = list(np.random.choice(tmp_neg_ser_list, self.negative_number, replace=True))
+        self_neg_list = self.sample_serial_negatives_from_text(self_negative_list)
         # coll neg完成序列化
         neg_list = []
         for neg in negative_movie_list:
-            tmp_neg_list = list(map(int, neg[1:-1].split(",")))
-            tmp_neg_ser_list = [self.item_serialize_dict.get(item) for item in tmp_neg_list]
             # 插入一条抽样
-            neg_list.append(list(np.random.choice(tmp_neg_ser_list, self.negative_number, replace=True)))
+            neg_list.append(self.sample_serial_negatives_from_text(neg))
         # 对当前item进行抽样
         # user，item id进行序列化
-        user = self.user_serialize_dict.get(user)
-        neg_user = self.user_serialize_dict.get(neg_user)
-        item = self.item_serialize_dict.get(item)
+        user = self.serialized_user_values[index]
+        neg_user = self.serialized_neg_user_values[index]
+        item = self.serialized_item_values[index]
         # 序列化positive_movie_list
         positive_movie_list = [self.item_serialize_dict.get(item) for item in positive_movie_list]
-        return torch.tensor(user), torch.tensor(item), torch.tensor(genres), torch.tensor(img_feature), \
-               torch.tensor(neg_user), torch.tensor(positive_movie_list), torch.tensor(neg_list), \
-               torch.tensor(self_neg_list)
+        return torch.as_tensor(user, dtype=torch.long), torch.as_tensor(item, dtype=torch.long),\
+               torch.as_tensor(genres, dtype=torch.long), torch.as_tensor(img_feature, dtype=torch.float32),\
+               torch.as_tensor(neg_user, dtype=torch.long), torch.as_tensor(positive_movie_list, dtype=torch.long),\
+               torch.as_tensor(np.asarray(neg_list), dtype=torch.long), torch.as_tensor(self_neg_list, dtype=torch.long)
