@@ -91,6 +91,50 @@ def sample_negative_serial_items(item_number, excluded_items, sample_size, rng=n
     return samples
 
 
+SUPPORTED_NEGATIVE_SAMPLING_MODES = {"legacy_cached", "fast_uniform", "original_np_choice"}
+
+
+def sample_original_np_choice_items(
+    item_set,
+    item_serialize_dict,
+    positive_raw_items,
+    positive_number,
+    negative_sample_size,
+    rng=np.random,
+):
+    """复刻 2026-06-08/09 实验使用的原始 raw-item 负采样路径。
+
+    这个函数故意不做 compact-index/rejection sampling，也不排序候选集合。诊断目的就是
+    让负采样“世界”回到旧代码：
+    `np.random.choice(list(self.item_set - set(positive_items_)), replace=True)`。
+    因此这里保留 Python set 转 list 的候选顺序、raw item -> serial id 的后置映射，
+    用来隔离最近负采样优化是否改变了 baseline/category_conf_input 的相对结果。
+    """
+    if positive_number < 0:
+        raise ValueError("positive_number must be non-negative")
+    if negative_sample_size < 0:
+        raise ValueError("negative_sample_size must be non-negative")
+
+    positive_candidates = list(positive_raw_items)
+    if len(positive_candidates) == 0:
+        raise ValueError("positive_raw_items must not be empty")
+    positive_items = list(rng.choice(positive_candidates, positive_number, replace=True))
+    positive_serial_items = np.asarray(
+        [item_serialize_dict[item] for item in positive_items],
+        dtype=np.int64,
+    )
+
+    negative_candidates = list(set(item_set) - set(positive_raw_items))
+    if len(negative_candidates) == 0:
+        raise ValueError("no negative item candidate exists")
+    negative_items = list(rng.choice(negative_candidates, negative_sample_size, replace=True))
+    negative_serial_items = np.asarray(
+        [item_serialize_dict[item] for item in negative_items],
+        dtype=np.int64,
+    )
+    return positive_serial_items, negative_serial_items
+
+
 class LegacyCachedNegativeSampler:
     """用 compact-index 方式保留旧协议候选语义，同时避免构造完整候选数组。
 
@@ -336,7 +380,7 @@ class RatingDataset(torch.utils.data.Dataset):
                 continue
             self.user_positive_serial_items[user] = serial_items
             self.user_positive_serial_sets[user] = set(serial_items.tolist())
-        if self.negative_sampling_mode not in {"legacy_cached", "fast_uniform"}:
+        if self.negative_sampling_mode not in SUPPORTED_NEGATIVE_SAMPLING_MODES:
             raise ValueError(f"unsupported negative_sampling_mode={self.negative_sampling_mode}")
         self.legacy_negative_sampler = LegacyCachedNegativeSampler(
             item_set=self.item_set,
@@ -383,17 +427,32 @@ class RatingDataset(torch.utils.data.Dataset):
         #  处理 positive items   #
         #  runtime sampling     #
         # --------------------- #
-        positive_items_ = self.user_positive_serial_items.get(user)
-        if positive_items_ is None:
-            positive_items_ = np.asarray([self.serialized_item_values[index]], dtype=np.int64)
-        positive_items_list = np.random.choice(positive_items_, self.positive_number, replace=True)
-        # runtime sampling negative
         negative_sample_size = self.negative_number*(self.positive_number+1)
+        if self.negative_sampling_mode == "original_np_choice":
+            # 诊断模式：完整保留 6 月 8/9 号实验的 raw item 采样路径。
+            # 注意这里故意不用预序列化正样本、不用 compact-index，也不排序 set-diff 候选。
+            # 它会比当前优化采样慢，但可以隔离“最近负采样改动”是否导致实验地基漂移。
+            positive_raw_items = self.user_item_interaction_dict.get(user)
+            if positive_raw_items is None:
+                positive_raw_items = [item]
+            positive_items_list, negative_items_ = sample_original_np_choice_items(
+                item_set=self.item_set,
+                item_serialize_dict=self.item_serialize_dict,
+                positive_raw_items=positive_raw_items,
+                positive_number=self.positive_number,
+                negative_sample_size=negative_sample_size,
+            )
+        else:
+            positive_items_ = self.user_positive_serial_items.get(user)
+            if positive_items_ is None:
+                positive_items_ = np.asarray([self.serialized_item_values[index]], dtype=np.int64)
+            positive_items_list = np.random.choice(positive_items_, self.positive_number, replace=True)
+        # runtime sampling negative
         if self.negative_sampling_mode == "legacy_cached":
             # 正式实验默认使用 legacy_cached：候选集合语义回到优化前协议，但通过缓存
             # 避免每条样本重复构造大候选列表，降低 CPU 瓶颈。
             negative_items_ = self.legacy_negative_sampler.sample(user, negative_sample_size)
-        else:
+        elif self.negative_sampling_mode == "fast_uniform":
             # fast_uniform 保留 cfd64c2 的最快路径。它直接在序列化 item id 空间做
             # rejection sampling，速度更高，但会改变固定 seed 下的负样本序列；因此只作为
             # 显式选择的极限速度协议，不作为默认正式实验协议。

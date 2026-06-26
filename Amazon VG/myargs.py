@@ -58,8 +58,8 @@ def get_args():
         '--negative_sampling_mode',
         type=str,
         default='legacy_cached',
-        choices=['legacy_cached', 'fast_uniform'],
-        help='legacy_cached keeps the pre-optimization negative candidate semantics with cache; fast_uniform keeps the fastest serial-id sampler',
+        choices=['legacy_cached', 'fast_uniform', 'original_np_choice'],
+        help='legacy_cached uses compact candidate sampling; fast_uniform keeps the fastest serial-id sampler; original_np_choice reproduces the 2026-06-08/09 raw-item np.choice path for diagnostics',
     )
     parser.add_argument(
         '--negative_sampling_cache_size',
