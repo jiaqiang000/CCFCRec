@@ -65,7 +65,7 @@ def get_args():
         '--negative_sampling_cache_size',
         type=int,
         default=512,
-        help='LRU user cache size for legacy_cached negative sampling',
+        help='kept for script compatibility; legacy_cached uses compact-index sampling and does not cache full negative arrays',
     )
     args = parser.parse_args()
     return args

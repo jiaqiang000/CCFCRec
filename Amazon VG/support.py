@@ -1,7 +1,6 @@
 import random
 import time
 import math
-from collections import OrderedDict
 
 from torch.utils.data import Dataset
 import sys
@@ -93,7 +92,7 @@ def sample_negative_serial_items(item_number, excluded_items, sample_size, rng=n
 
 
 class LegacyCachedNegativeSampler:
-    """缓存旧协议负样本候选集合，降低 CPU 开销。
+    """用 compact-index 方式保留旧协议候选语义，同时避免构造完整候选数组。
 
     改动原因：
     cfd64c2 中的 `sample_negative_serial_items` 直接在序列化 item id 空间做 rejection
@@ -102,61 +101,54 @@ class LegacyCachedNegativeSampler:
     负样本序列变化，从而改变训练轨迹。
 
     这个类保留旧协议的核心语义：每个 user 的负候选仍然是
-    `训练 item 全集 - 该 user 的训练交互 item`。性能优化只做在“候选集合缓存”这一层：
-    第一次遇到 user 时构造候选 serial item 数组，之后重复使用，避免每条样本都重新做
-    大规模 set difference 和 raw item -> serial id 映射。
+    `训练 item 全集 - 该 user 的训练交互 item`。性能优化不再缓存完整负候选数组，因为
+    Amazon-VG 有 5 万多个 user，shuffle 后小 LRU cache 命中率极低，会退回到反复构造
+    2 万多个 item 候选数组的慢路径。
+
+    当前实现只为每个 user 保存“需要跳过的正样本 serial id”。采样时先在 compact 候选
+    空间 `[0, item_number - positive_count)` 里抽索引，再把索引平移到跳过正样本后的
+    serial id。这样不生成大候选列表，随机数消耗也比 rejection sampling 更接近旧的
+    `np.random.choice(候选列表)`。
     """
 
     def __init__(self, item_set, item_serialize_dict, user_item_interaction_dict, max_cache_size=512):
         if max_cache_size <= 0:
             raise ValueError("max_cache_size must be positive")
-        self.item_set = set(item_set)
-        self.item_serialize_dict = item_serialize_dict
-        self.user_item_interaction_dict = user_item_interaction_dict
-        self.max_cache_size = int(max_cache_size)
-        self._candidate_cache = OrderedDict()
+        self.item_number = len(item_serialize_dict)
+        self.user_positive_serial_items = {}
+        for user, positive_items in user_item_interaction_dict.items():
+            positive_serial_items = sorted(
+                {
+                    item_serialize_dict[item]
+                    for item in positive_items
+                    if item in item_serialize_dict
+                }
+            )
+            if positive_serial_items:
+                self.user_positive_serial_items[user] = np.asarray(positive_serial_items, dtype=np.int64)
 
-    def _build_candidate_serial_items(self, user):
-        positive_items = set(self.user_item_interaction_dict.get(user, []))
-        # 保留旧实现的候选集合定义：从训练 item 全集中移除该 user 的全部正交互 item。
-        # 注意这里仍使用 raw item 的 set difference，而不是序列化 id 空间的 rejection
-        # sampling；这是为了让“采样协议”更接近优化前实验。
-        candidate_raw_items = self.item_set - positive_items
-        candidate_serial_items = np.asarray(
-            [
-                self.item_serialize_dict[item]
-                for item in candidate_raw_items
-                if item in self.item_serialize_dict
-            ],
-            dtype=np.int64,
-        )
-        if candidate_serial_items.size == 0:
-            raise ValueError(f"no negative item candidate exists for user {user}")
-        return candidate_serial_items
-
-    def _get_candidate_serial_items(self, user):
-        cached = self._candidate_cache.get(user)
-        if cached is not None:
-            self._candidate_cache.move_to_end(user)
-            return cached
-
-        candidate_serial_items = self._build_candidate_serial_items(user)
-        self._candidate_cache[user] = candidate_serial_items
-        # LRU 限制是为了避免在多 worker 训练时把所有 user 的大候选数组都缓存下来。
-        # cache size 越大，命中率越高、CPU 越省；内存也越高。默认值由命令行参数控制。
-        if len(self._candidate_cache) > self.max_cache_size:
-            self._candidate_cache.popitem(last=False)
-        return candidate_serial_items
+    def _map_compact_indices_to_serial_items(self, compact_indices, positive_serial_items):
+        # compact_indices 是“移除正样本后的候选列表”下标。下面按正样本 serial id 的位置
+        # 逐个跳过空洞，把 compact 下标映射回完整 serial id 空间。
+        # 用户正样本数量通常很小，循环次数远少于 item_number，因此比构造完整候选数组快很多。
+        serial_items = compact_indices.astype(np.int64, copy=True)
+        for positive_serial_item in positive_serial_items:
+            serial_items += serial_items >= positive_serial_item
+        return serial_items
 
     def sample(self, user, sample_size, rng=np.random):
         if sample_size < 0:
             raise ValueError("sample_size must be non-negative")
         if sample_size == 0:
             return np.empty(0, dtype=np.int64)
-        candidate_serial_items = self._get_candidate_serial_items(user)
-        # 使用 np.random.choice 从候选数组采样，保留旧实现“从候选列表有放回采样”的语义。
-        # 与旧代码相比，候选集合只缓存构造；采样本身仍由 numpy 完成。
-        return rng.choice(candidate_serial_items, size=sample_size, replace=True).astype(np.int64, copy=False)
+        positive_serial_items = self.user_positive_serial_items.get(user)
+        if positive_serial_items is None or positive_serial_items.size == 0:
+            return _rng_integers(rng, self.item_number, sample_size).astype(np.int64, copy=False)
+        candidate_count = self.item_number - positive_serial_items.size
+        if candidate_count <= 0:
+            raise ValueError(f"no negative item candidate exists for user {user}")
+        compact_indices = _rng_integers(rng, candidate_count, sample_size)
+        return self._map_compact_indices_to_serial_items(compact_indices, positive_serial_items)
 
 
 def build_item_feature_tensors(item_serialize_dict, img_features, genres, category_num):
