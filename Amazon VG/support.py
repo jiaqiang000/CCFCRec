@@ -1,6 +1,7 @@
 import random
 import time
 import math
+from collections import OrderedDict
 
 from torch.utils.data import Dataset
 import sys
@@ -89,6 +90,73 @@ def sample_negative_serial_items(item_number, excluded_items, sample_size, rng=n
             samples[filled:filled + take] = draw[:take]
             filled += take
     return samples
+
+
+class LegacyCachedNegativeSampler:
+    """缓存旧协议负样本候选集合，降低 CPU 开销。
+
+    改动原因：
+    cfd64c2 中的 `sample_negative_serial_items` 直接在序列化 item id 空间做 rejection
+    sampling，速度快，但它改变了旧代码 `np.random.choice(list(self.item_set -
+    set(positive_items_)))` 的候选集合构造顺序和随机路径。对固定 seed 的训练来说，这会让
+    负样本序列变化，从而改变训练轨迹。
+
+    这个类保留旧协议的核心语义：每个 user 的负候选仍然是
+    `训练 item 全集 - 该 user 的训练交互 item`。性能优化只做在“候选集合缓存”这一层：
+    第一次遇到 user 时构造候选 serial item 数组，之后重复使用，避免每条样本都重新做
+    大规模 set difference 和 raw item -> serial id 映射。
+    """
+
+    def __init__(self, item_set, item_serialize_dict, user_item_interaction_dict, max_cache_size=512):
+        if max_cache_size <= 0:
+            raise ValueError("max_cache_size must be positive")
+        self.item_set = set(item_set)
+        self.item_serialize_dict = item_serialize_dict
+        self.user_item_interaction_dict = user_item_interaction_dict
+        self.max_cache_size = int(max_cache_size)
+        self._candidate_cache = OrderedDict()
+
+    def _build_candidate_serial_items(self, user):
+        positive_items = set(self.user_item_interaction_dict.get(user, []))
+        # 保留旧实现的候选集合定义：从训练 item 全集中移除该 user 的全部正交互 item。
+        # 注意这里仍使用 raw item 的 set difference，而不是序列化 id 空间的 rejection
+        # sampling；这是为了让“采样协议”更接近优化前实验。
+        candidate_raw_items = self.item_set - positive_items
+        candidate_serial_items = np.asarray(
+            [
+                self.item_serialize_dict[item]
+                for item in candidate_raw_items
+                if item in self.item_serialize_dict
+            ],
+            dtype=np.int64,
+        )
+        if candidate_serial_items.size == 0:
+            raise ValueError(f"no negative item candidate exists for user {user}")
+        return candidate_serial_items
+
+    def _get_candidate_serial_items(self, user):
+        cached = self._candidate_cache.get(user)
+        if cached is not None:
+            self._candidate_cache.move_to_end(user)
+            return cached
+
+        candidate_serial_items = self._build_candidate_serial_items(user)
+        self._candidate_cache[user] = candidate_serial_items
+        # LRU 限制是为了避免在多 worker 训练时把所有 user 的大候选数组都缓存下来。
+        # cache size 越大，命中率越高、CPU 越省；内存也越高。默认值由命令行参数控制。
+        if len(self._candidate_cache) > self.max_cache_size:
+            self._candidate_cache.popitem(last=False)
+        return candidate_serial_items
+
+    def sample(self, user, sample_size, rng=np.random):
+        if sample_size < 0:
+            raise ValueError("sample_size must be non-negative")
+        if sample_size == 0:
+            return np.empty(0, dtype=np.int64)
+        candidate_serial_items = self._get_candidate_serial_items(user)
+        # 使用 np.random.choice 从候选数组采样，保留旧实现“从候选列表有放回采样”的语义。
+        # 与旧代码相比，候选集合只缓存构造；采样本身仍由 numpy 完成。
+        return rng.choice(candidate_serial_items, size=sample_size, replace=True).astype(np.int64, copy=False)
 
 
 def build_item_feature_tensors(item_serialize_dict, img_features, genres, category_num):
@@ -219,6 +287,8 @@ class RatingDataset(torch.utils.data.Dataset):
         positive_number,
         negative_number,
         adaptive_history_max_count=20,
+        negative_sampling_mode="legacy_cached",
+        negative_sampling_cache_size=512,
     ):
         self.train_csv = train_csv
         # 读其他内容
@@ -238,6 +308,8 @@ class RatingDataset(torch.utils.data.Dataset):
         self.item_number = len(self.item_serialize_dict)
         self.positive_number = positive_number
         self.negative_number = negative_number
+        self.negative_sampling_mode = negative_sampling_mode
+        self.negative_sampling_cache_size = negative_sampling_cache_size
         self.adaptive_history_max_count = adaptive_history_max_count
         self.category_num = category_num
         self.user_item_interaction_dict = build_user_item_interaction_dict()
@@ -272,6 +344,14 @@ class RatingDataset(torch.utils.data.Dataset):
                 continue
             self.user_positive_serial_items[user] = serial_items
             self.user_positive_serial_sets[user] = set(serial_items.tolist())
+        if self.negative_sampling_mode not in {"legacy_cached", "fast_uniform"}:
+            raise ValueError(f"unsupported negative_sampling_mode={self.negative_sampling_mode}")
+        self.legacy_negative_sampler = LegacyCachedNegativeSampler(
+            item_set=self.item_set,
+            item_serialize_dict=self.item_serialize_dict,
+            user_item_interaction_dict=self.user_item_interaction_dict,
+            max_cache_size=self.negative_sampling_cache_size,
+        )
         self.item_category_tensor, self.item_image_feature_tensor = build_item_feature_tensors(
             item_serialize_dict=self.item_serialize_dict,
             img_features=self.img_feature_dict,
@@ -316,12 +396,21 @@ class RatingDataset(torch.utils.data.Dataset):
             positive_items_ = np.asarray([self.serialized_item_values[index]], dtype=np.int64)
         positive_items_list = np.random.choice(positive_items_, self.positive_number, replace=True)
         # runtime sampling negative
-        positive_item_set = self.user_positive_serial_sets.get(user, set(positive_items_.tolist()))
-        negative_items_ = sample_negative_serial_items(
-            self.item_number,
-            positive_item_set,
-            self.negative_number*(self.positive_number+1),
-        )
+        negative_sample_size = self.negative_number*(self.positive_number+1)
+        if self.negative_sampling_mode == "legacy_cached":
+            # 正式实验默认使用 legacy_cached：候选集合语义回到优化前协议，但通过缓存
+            # 避免每条样本重复构造大候选列表，降低 CPU 瓶颈。
+            negative_items_ = self.legacy_negative_sampler.sample(user, negative_sample_size)
+        else:
+            # fast_uniform 保留 cfd64c2 的最快路径。它直接在序列化 item id 空间做
+            # rejection sampling，速度更高，但会改变固定 seed 下的负样本序列；因此只作为
+            # 显式选择的极限速度协议，不作为默认正式实验协议。
+            positive_item_set = self.user_positive_serial_sets.get(user, set(positive_items_.tolist()))
+            negative_items_ = sample_negative_serial_items(
+                self.item_number,
+                positive_item_set,
+                negative_sample_size,
+            )
         negative_item_list = negative_items_[:self.negative_number*self.positive_number].reshape(
             self.positive_number,
             self.negative_number,

@@ -470,7 +470,9 @@ if __name__ == '__main__':
     # load dataset
     dataSet = RatingDataset(train_df, img_feature_dict, asin_category_int_map, category_ser_map.__len__(),
                             user_ser_dict, args.positive_number, args.negative_number,
-                            adaptive_history_max_count=args.adaptive_history_max_count)
+                            adaptive_history_max_count=args.adaptive_history_max_count,
+                            negative_sampling_mode=args.negative_sampling_mode,
+                            negative_sampling_cache_size=args.negative_sampling_cache_size)
     args.user_number = dataSet.user_number
     args.item_number = dataSet.item_number
     loader_kwargs = {

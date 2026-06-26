@@ -22,6 +22,8 @@ PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 SAVE_BATCH_TIME="${SAVE_BATCH_TIME:-300}"
 RESULT_ROOT="${RESULT_ROOT:-/hy-tmp/ccfcrec_result}"
 VALIDATE_BATCH_SIZE="${VALIDATE_BATCH_SIZE:-512}"
+NEGATIVE_SAMPLING_MODE="${NEGATIVE_SAMPLING_MODE:-legacy_cached}"
+NEGATIVE_SAMPLING_CACHE_SIZE="${NEGATIVE_SAMPLING_CACHE_SIZE:-512}"
 
 "${PYTHON_BIN}" model.py \
   --seed "${SEED}" \
@@ -33,4 +35,6 @@ VALIDATE_BATCH_SIZE="${VALIDATE_BATCH_SIZE:-512}"
   --save_batch_time "${SAVE_BATCH_TIME}" \
   --result_root "${RESULT_ROOT}" \
   --validate_batch_size "${VALIDATE_BATCH_SIZE}" \
+  --negative_sampling_mode "${NEGATIVE_SAMPLING_MODE}" \
+  --negative_sampling_cache_size "${NEGATIVE_SAMPLING_CACHE_SIZE}" \
   "$@"

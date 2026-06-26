@@ -54,6 +54,19 @@ def get_args():
     parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch factor when num_workers > 0')
     parser.add_argument('--multiprocessing_context', type=str, default='', help='DataLoader multiprocessing context, e.g. fork on macOS')
     parser.add_argument('--validate_batch_size', type=int, default=512, help='validation item batch size')
+    parser.add_argument(
+        '--negative_sampling_mode',
+        type=str,
+        default='legacy_cached',
+        choices=['legacy_cached', 'fast_uniform'],
+        help='legacy_cached keeps the pre-optimization negative candidate semantics with cache; fast_uniform keeps the fastest serial-id sampler',
+    )
+    parser.add_argument(
+        '--negative_sampling_cache_size',
+        type=int,
+        default=512,
+        help='LRU user cache size for legacy_cached negative sampling',
+    )
     args = parser.parse_args()
     return args
 
