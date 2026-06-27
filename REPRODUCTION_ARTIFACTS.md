@@ -4,6 +4,22 @@
 
 ## Amazon VG
 
+### 当前正式快速协议
+
+2026-06-27 后的 Amazon-VG 新实验默认采用：
+
+```text
+negative_sampling_mode = fast_uniform
+num_workers = 8
+seed = 43
+batch_size = 1024
+save_batch_time = 300
+```
+
+选择 `fast_uniform` 的原因是：它保持“从当前用户未交互 item 中均匀采样负样本”的训练语义，同时把 CPU 负采样瓶颈降到可接受范围。`legacy_cached` 和 `original_np_choice` 仍保留用于诊断，其中 `original_np_choice` 用来复刻 2026-06-08/09 旧 raw-item `np.random.choice` 路径，但速度太慢，不作为后续正式实验协议。
+
+注意：`fast_uniform` 与 2026-06-08/09 workers45 旧协议不是同一条固定随机轨迹。后续方法必须在同一 `fast_uniform` 协议下与对应 baseline 对比，不能把旧 workers45、`legacy_cached`、`original_np_choice` 的结果混作同协议主表。
+
 ### 数据位置
 
 服务器上期望的数据目录：
@@ -29,21 +45,26 @@ validate_rating.csv
 先用这个命令确认数据、代码、CUDA、多 worker DataLoader 都能正常跑：
 
 ```bash
-cd "/root/CCFCRec/Amazon VG"
+cd "/root/CCFCRec"
 export CCFCREC_CUDA_DEVICE=0
-/usr/bin/time -v python model.py --epoch 1 --save_batch_time 999999999 --num_workers 45 --pin_memory --persistent_workers 2>&1 | tee smoke_amazon_vg_workers45.log
+export NEGATIVE_SAMPLING_MODE=fast_uniform
+/usr/bin/time -v bash scripts/train_amazon_vg_cuda.sh --epoch 1 --save_batch_time 999999999 --method_variant baseline 2>&1 | tee smoke_amazon_vg_fast_uniform_workers8.log
 ```
 
 这里的 `save_batch_time` 故意设得大于总 batch 数，所以这个 smoke test 不会触发验证，也不会保存 checkpoint。它只用于确认训练入口是否能跑起来，以及估算速度和资源占用。
 
 ### 正式训练
 
-Amazon VG 默认 `batch_size=1024` 时，每个 epoch 有 326 个 batch。`save_batch_time=300` 基本会在每个 epoch 末尾触发一次验证和 checkpoint 保存。当前服务器是 48 核，`num_workers=45` 可以给主进程、CUDA 搬运、系统和日志留出少量 CPU 余量，所以 Amazon VG 正式训练优先使用 45 workers。
+Amazon VG 默认 `batch_size=1024` 时，每个 epoch 有 326 个 batch。`save_batch_time=300` 基本会在每个 epoch 末尾触发一次验证和 checkpoint 保存。速度优化后正式训练优先使用仓库脚本，脚本默认 `NUM_WORKERS=8`、`NEGATIVE_SAMPLING_MODE=fast_uniform`。
 
 ```bash
-cd "/root/CCFCRec/Amazon VG"
+cd "/root/CCFCRec"
 export CCFCREC_CUDA_DEVICE=0
-/usr/bin/time -v python model.py --epoch 100 --save_batch_time 300 --num_workers 45 --pin_memory --persistent_workers 2>&1 | tee run_amazon_vg_workers45.log
+export SEED=43
+export NUM_WORKERS=8
+export NEGATIVE_SAMPLING_MODE=fast_uniform
+export RESULT_ROOT=/hy-tmp/ccfcrec_result
+/usr/bin/time -v bash scripts/train_amazon_vg_cuda.sh --epoch 100 --method_variant baseline 2>&1 | tee /hy-tmp/ccfcrec_logs/run_amazon_vg_baseline_seed43_workers8_fast_uniform.log
 ```
 
 ### 训练生成的文件
@@ -51,7 +72,7 @@ export CCFCREC_CUDA_DEVICE=0
 训练会创建一个带时间戳的结果目录：
 
 ```text
-/root/CCFCRec/Amazon VG/result/YYYY-MM-DD_HH_MM_SS/
+/hy-tmp/ccfcrec_result/YYYY-MM-DD_HH_MM_SS/
 ```
 
 目录里通常会有：
@@ -83,13 +104,13 @@ ndcg@5/ndcg@10/ndcg@20  # 验证集 NDCG 指标
 训练日志：
 
 ```text
-/root/CCFCRec/Amazon VG/run_amazon_vg_workers45.log
+/hy-tmp/ccfcrec_logs/run_amazon_vg_<method>_seed43_workers8_fast_uniform.log
 ```
 
 最新结果目录可以这样查：
 
 ```bash
-ls -td "/root/CCFCRec/Amazon VG/result/"* | head -1
+ls -td "/hy-tmp/ccfcrec_result/"* | head -1
 ```
 
 建议直接下载整个最新结果目录。至少要保留这些文件：

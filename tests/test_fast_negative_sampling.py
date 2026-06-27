@@ -13,7 +13,25 @@ AMAZON_VG_DIR = REPO_ROOT / "Amazon VG"
 sys.path.insert(0, str(AMAZON_VG_DIR))
 
 import support
+import myargs
 from support import sample_negative_serial_items
+
+
+class DefaultNegativeSamplingProtocolTest(unittest.TestCase):
+    def test_argparse_defaults_to_fast_uniform_protocol(self):
+        original_argv = sys.argv
+        sys.argv = ["model.py"]
+        try:
+            args = myargs.get_args()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(args.negative_sampling_mode, "fast_uniform")
+
+    def test_cuda_training_script_defaults_to_fast_uniform_protocol(self):
+        script = (REPO_ROOT / "scripts" / "train_amazon_vg_cuda.sh").read_text()
+
+        self.assertIn('NEGATIVE_SAMPLING_MODE="${NEGATIVE_SAMPLING_MODE:-fast_uniform}"', script)
 
 
 class FastNegativeSamplingTest(unittest.TestCase):

@@ -323,7 +323,7 @@ class RatingDataset(torch.utils.data.Dataset):
         positive_number,
         negative_number,
         adaptive_history_max_count=20,
-        negative_sampling_mode="legacy_cached",
+        negative_sampling_mode="fast_uniform",
         negative_sampling_cache_size=512,
     ):
         self.train_csv = train_csv
@@ -449,13 +449,14 @@ class RatingDataset(torch.utils.data.Dataset):
             positive_items_list = np.random.choice(positive_items_, self.positive_number, replace=True)
         # runtime sampling negative
         if self.negative_sampling_mode == "legacy_cached":
-            # 正式实验默认使用 legacy_cached：候选集合语义回到优化前协议，但通过缓存
+            # 保守诊断协议：候选集合语义回到优化前协议，但通过 compact-index
             # 避免每条样本重复构造大候选列表，降低 CPU 瓶颈。
             negative_items_ = self.legacy_negative_sampler.sample(user, negative_sample_size)
         elif self.negative_sampling_mode == "fast_uniform":
-            # fast_uniform 保留 cfd64c2 的最快路径。它直接在序列化 item id 空间做
-            # rejection sampling，速度更高，但会改变固定 seed 下的负样本序列；因此只作为
-            # 显式选择的极限速度协议，不作为默认正式实验协议。
+            # 后续正式实验默认协议：直接在序列化 item id 空间做 rejection sampling。
+            # 该协议保持“从用户未交互 item 中均匀采样”的训练语义，速度最高；
+            # 但固定 seed 下的负样本序列不同于 2026-06-08/09 旧 workers45 协议，
+            # 因此新旧协议结果不能混作同一随机轨迹比较。
             positive_item_set = self.user_positive_serial_sets.get(user, set(positive_items_.tolist()))
             negative_items_ = sample_negative_serial_items(
                 self.item_number,
