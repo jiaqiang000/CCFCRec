@@ -14,6 +14,8 @@
 | `run_task4_highdetail_m7a_surface_ablation_seed43_fast_uniform_mps_100epoch.sh` | 本地 Mac MPS（Mac Metal 后端）完整筛选 launcher（封装启动脚本）。 | Task4-revise-3 M7a high-detail carrier surface ablation：M8q/M8qs/M8s/M8ss，seed43，workers8，fast_uniform，100epoch |
 | `run_task4_highdetail_qonly_alpha_sweep_m9_seed43_fast_uniform_mps_smoke_1epoch.sh` | 本地 Mac MPS（Mac Metal 后端）冒烟测试 launcher（封装启动脚本）。 | Task4-revise-4 M9 q-only alpha sweep：alpha 0.75/1.0 各自 real/shuffle，seed43，workers8，fast_uniform，1epoch |
 | `run_task4_highdetail_qonly_alpha_sweep_m9_seed43_fast_uniform_mps_100epoch.sh` | 本地 Mac MPS（Mac Metal 后端）完整筛选 launcher（封装启动脚本）。 | Task4-revise-4 M9 q-only alpha sweep：alpha 0.75/1.0 各自 real/shuffle，seed43，workers8，fast_uniform，100epoch |
+| `run_task4_competitor_pair_m10r4_seed43_fast_uniform_mps_smoke_1epoch.sh` | 本地 Mac MPS（Mac Metal 后端）冒烟测试 launcher（封装启动脚本）。 | M10-R4 competitor pair carrier：real/shuffle/RSP/Acat controls，alpha 默认 0.25，seed43，workers8，fast_uniform，1epoch |
+| `run_task4_competitor_pair_m10r4_seed43_fast_uniform_mps_100epoch.sh` | 本地 Mac MPS（Mac Metal 后端）完整快筛 launcher（封装启动脚本）。 | M10-R4 competitor pair carrier：real/shuffle/RSP/Acat controls，alpha 默认 0.25，seed43，workers8，fast_uniform，100epoch |
 | `run_task4_full_100epoch_mps.sh` | 兼容旧命令的 wrapper（封装转发脚本）。 | 转发到上面的 Task4 实验专用 launcher |
 
 实验专用 launcher 应在结果目录写入 `launcher_manifest.env`，至少记录：
