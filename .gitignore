@@ -12,6 +12,9 @@ result/
 *.npy
 *.npz
 *.csv
+*.log
+*.log.caffeinate
+*_latest_result_root.txt
 
 ML-20M/data/*
 !ML-20M/data/readme.txt
