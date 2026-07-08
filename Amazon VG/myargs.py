@@ -46,6 +46,10 @@ def get_args():
             'task4_acat_hardonly_qmargin',
             'task4_highdetail_pairmargin',
             'task4_highdetail_pairmargin_shuffle',
+            'task4_competitor_pair',
+            'task4_competitor_pair_shuffle',
+            'task4_competitor_pair_rsp_control',
+            'task4_competitor_pair_acat_control',
         ],
         help='training method variant',
     )
@@ -66,6 +70,9 @@ def get_args():
     parser.add_argument('--task4_disable_self_contrast_weight', action='store_true', help='disable Task4 self contrast weighting')
     parser.add_argument('--task4_reweight_contrast', action='store_true', help='also apply Task4 weights to q_v_c item contrast loss')
     parser.add_argument('--task4_pair_margin', type=float, default=0.2, help='q_v_c target-user vs competitor-user margin for Task4 pairwise-margin variants')
+    parser.add_argument('--task4_competitor_alpha', type=float, default=0.25, help='Task4 R4 competitor-pair loss scale')
+    parser.add_argument('--task4_competitor_margin', type=float, default=0.1, help='Task4 R4 target-vs-competitor softplus margin')
+    parser.add_argument('--task4_competitor_k', type=int, default=20, help='Task4 R4 competitor candidate count; first implementation uses batch neg_user')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

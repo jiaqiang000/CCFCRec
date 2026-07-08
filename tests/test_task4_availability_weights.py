@@ -17,9 +17,12 @@ from model import (
     CCFCRec,
     TASK4_METHOD_VARIANTS,
     build_run_config,
+    build_task4_competitor_pair_targets_from_profile,
     build_task4_pair_margin_targets_from_profile,
     build_task4_item_weights_from_profile,
+    task4_competitor_pair_loss,
     task4_pair_margin_loss,
+    uses_task4_competitor_pair,
     uses_task4_item_weights,
     uses_task4_pair_margin,
     validate_method_args,
@@ -54,6 +57,9 @@ def make_args(method_variant):
         task4_disable_self_contrast_weight=False,
         task4_reweight_contrast=False,
         task4_pair_margin=0.2,
+        task4_competitor_alpha=0.25,
+        task4_competitor_margin=0.1,
+        task4_competitor_k=20,
         seed=43,
         num_workers=0,
         batch_size=1024,
@@ -336,6 +342,99 @@ class Task4AvailabilityWeightsTest(unittest.TestCase):
         }:
             self.assertIn(method_variant, TASK4_METHOD_VARIANTS)
             validate_method_args(make_args(method_variant))
+
+    def test_competitor_pair_variants_are_registered_separately(self):
+        for method_variant in {
+            "task4_competitor_pair",
+            "task4_competitor_pair_shuffle",
+            "task4_competitor_pair_rsp_control",
+            "task4_competitor_pair_acat_control",
+        }:
+            args = make_args(method_variant)
+            self.assertIn(method_variant, TASK4_METHOD_VARIANTS)
+            self.assertTrue(uses_task4_competitor_pair(args))
+            self.assertFalse(uses_task4_item_weights(args))
+            self.assertFalse(uses_task4_pair_margin(args))
+            validate_method_args(args)
+
+    def test_competitor_pair_targets_highdetail_trainhard_items(self):
+        profile = make_profile()
+        profile.loc[profile["raw_asin"] == "b", "high_acat_train_safe_hard_flag"] = True
+        targets = build_task4_competitor_pair_targets_from_profile(
+            profile,
+            {"a": 0, "b": 1, "c": 2, "d": 3},
+            make_args("task4_competitor_pair"),
+        )
+
+        self.assertEqual(targets["loss_weight"][0].item(), 0.0)
+        self.assertEqual(targets["loss_weight"][1].item(), 0.0)
+        self.assertGreater(targets["loss_weight"][2].item(), 0.0)
+        self.assertEqual(targets["loss_weight"][3].item(), 0.0)
+        self.assertGreater(targets["margin"][2].item(), 0.1)
+
+    def test_competitor_pair_shuffle_preserves_target_count(self):
+        profile = make_profile()
+        item_map = {"a": 0, "b": 1, "c": 2, "d": 3}
+        shuffle_args = make_args("task4_competitor_pair_shuffle")
+        shuffle_args.task4_shuffle_seed = 2
+
+        shuffled = build_task4_competitor_pair_targets_from_profile(
+            profile,
+            item_map,
+            shuffle_args,
+        )
+        real = build_task4_competitor_pair_targets_from_profile(
+            profile,
+            item_map,
+            make_args("task4_competitor_pair"),
+        )
+
+        self.assertEqual(
+            int((shuffled["loss_weight"] > 0).sum().item()),
+            int((real["loss_weight"] > 0).sum().item()),
+        )
+        self.assertFalse(torch.equal(shuffled["loss_weight"], real["loss_weight"]))
+
+    def test_competitor_pair_controls_use_rsp_and_acat_masks(self):
+        item_map = {"a": 0, "b": 1, "c": 2, "d": 3}
+        rsp = build_task4_competitor_pair_targets_from_profile(
+            make_profile(),
+            item_map,
+            make_args("task4_competitor_pair_rsp_control"),
+        )
+        acat = build_task4_competitor_pair_targets_from_profile(
+            make_profile(),
+            item_map,
+            make_args("task4_competitor_pair_acat_control"),
+        )
+
+        self.assertGreater(rsp["loss_weight"][0].item(), 0.0)
+        self.assertEqual(acat["loss_weight"][0].item(), 0.0)
+        self.assertGreater(acat["loss_weight"][2].item(), 0.0)
+        self.assertFalse(torch.equal(rsp["loss_weight"], acat["loss_weight"]))
+
+    def test_competitor_pair_loss_uses_softplus_only_for_weighted_items(self):
+        diff = torch.tensor([0.30, -0.10, 0.00])
+        targets = {
+            "loss_weight": torch.tensor([0.5, 0.0, 1.0]),
+            "margin": torch.tensor([0.10, 0.10, 0.20]),
+        }
+        expected = torch.nn.functional.softplus(torch.tensor(-0.20)) * 0.5
+        expected = expected + torch.nn.functional.softplus(torch.tensor(0.20))
+
+        loss = task4_competitor_pair_loss(diff, targets)
+
+        torch.testing.assert_close(loss, expected)
+
+    def test_run_config_records_competitor_pair_params(self):
+        args = make_args("task4_competitor_pair")
+        model = CCFCRec(args)
+
+        config = build_run_config(args, model)
+
+        self.assertEqual(config["task4_competitor_alpha"], 0.25)
+        self.assertEqual(config["task4_competitor_margin"], 0.1)
+        self.assertEqual(config["task4_competitor_k"], 20)
 
 
 if __name__ == "__main__":

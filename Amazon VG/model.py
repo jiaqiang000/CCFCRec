@@ -60,7 +60,18 @@ TASK4_PAIR_MARGIN_METHOD_VARIANTS = {
     "task4_highdetail_pairmargin_shuffle",
 }
 
-TASK4_METHOD_VARIANTS = TASK4_WEIGHT_METHOD_VARIANTS | TASK4_PAIR_MARGIN_METHOD_VARIANTS
+TASK4_COMPETITOR_PAIR_METHOD_VARIANTS = {
+    "task4_competitor_pair",
+    "task4_competitor_pair_shuffle",
+    "task4_competitor_pair_rsp_control",
+    "task4_competitor_pair_acat_control",
+}
+
+TASK4_METHOD_VARIANTS = (
+    TASK4_WEIGHT_METHOD_VARIANTS
+    | TASK4_PAIR_MARGIN_METHOD_VARIANTS
+    | TASK4_COMPETITOR_PAIR_METHOD_VARIANTS
+)
 
 TASK4_FORBIDDEN_TRAIN_COLUMNS = {
     "hr@20",
@@ -129,6 +140,10 @@ def uses_task4_item_weights(args):
 
 def uses_task4_pair_margin(args):
     return getattr(args, "method_variant", "baseline") in TASK4_PAIR_MARGIN_METHOD_VARIANTS
+
+
+def uses_task4_competitor_pair(args):
+    return getattr(args, "method_variant", "baseline") in TASK4_COMPETITOR_PAIR_METHOD_VARIANTS
 
 
 def _bool_series(series):
@@ -328,6 +343,68 @@ def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, a
     return {"loss_weight": loss_weight, "margin": margin}
 
 
+def _task4_competitor_pair_flags_and_scores(profile, args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant == "task4_competitor_pair":
+        flags = _task4_highdetail_trainhard_flags(profile)
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+        return flags, (acat_score + hard_score) / 2.0
+    if method_variant == "task4_competitor_pair_shuffle":
+        flags = _task4_highdetail_trainhard_flags(profile)
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+        scores = (acat_score + hard_score) / 2.0
+        shuffled_flags, shuffled_scores = _task4_shuffle_by_split_and_detail(profile, flags, args, scores=scores)
+        return _task4_high_detail_flags(profile) & shuffled_flags, _clip01(shuffled_scores)
+    if method_variant == "task4_competitor_pair_rsp_control":
+        if "RSP_group" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 RSP_group")
+        flags = _task4_high_detail_flags(profile) & profile["RSP_group"].astype(str).eq("RSP_high")
+        if "RSP_score" in profile.columns:
+            scores = _clip01(_numeric_task4_series(profile, "RSP_score"))
+        else:
+            scores = pd.Series(1.0, index=profile.index)
+        return flags, scores
+    if method_variant == "task4_competitor_pair_acat_control":
+        flags = _task4_high_detail_flags(profile) & _task4_high_acat_flags(profile)
+        return flags, _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+    raise ValueError(f"unsupported Task4 competitor-pair method_variant={method_variant}")
+
+
+def build_task4_competitor_pair_targets_from_profile(profile, item_serialize_dict, args, item_number=None):
+    if not uses_task4_competitor_pair(args):
+        return None
+    if "raw_asin" not in profile.columns:
+        raise ValueError("Task4 profile 缺少 raw_asin")
+    if not item_serialize_dict:
+        raise ValueError("item_serialize_dict must not be empty")
+    if item_number is None:
+        item_number = max(item_serialize_dict.values()) + 1
+    alpha = float(getattr(args, "task4_competitor_alpha", 0.25))
+    if alpha <= 0:
+        raise ValueError("task4_competitor_alpha must be positive for Task4 competitor-pair variants")
+    base_margin = float(getattr(args, "task4_competitor_margin", 0.1))
+    if base_margin <= 0:
+        raise ValueError("task4_competitor_margin must be positive for Task4 competitor-pair variants")
+
+    work = profile.copy().sort_values("raw_asin").reset_index(drop=True)
+    flags, scores = _task4_competitor_pair_flags_and_scores(work, args)
+    scores = _clip01(scores)
+    loss_weight = torch.zeros(int(item_number), dtype=torch.float32)
+    margin = torch.full((int(item_number),), base_margin, dtype=torch.float32)
+    for raw_asin, flag, score in zip(work["raw_asin"], flags.astype(bool), scores):
+        serial_item = item_serialize_dict.get(raw_asin)
+        if serial_item is None:
+            continue
+        serial_item = int(serial_item)
+        score = float(score)
+        if bool(flag):
+            loss_weight[serial_item] = alpha * (0.5 + 0.5 * score)
+            margin[serial_item] = base_margin * (1.0 + score)
+    return {"loss_weight": loss_weight, "margin": margin}
+
+
 def load_task4_item_weights(item_serialize_dict, args, item_number=None):
     if not uses_task4_item_weights(args):
         return None
@@ -348,6 +425,16 @@ def load_task4_pair_margin_targets(item_serialize_dict, args, item_number=None):
     return build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=item_number)
 
 
+def load_task4_competitor_pair_targets(item_serialize_dict, args, item_number=None):
+    if not uses_task4_competitor_pair(args):
+        return None
+    profile_path = getattr(args, "task4_profile_path", "")
+    if not profile_path:
+        raise ValueError("task4_profile_path is required for Task4 variants")
+    profile = pd.read_csv(profile_path)
+    return build_task4_competitor_pair_targets_from_profile(profile, item_serialize_dict, args, item_number=item_number)
+
+
 def weighted_sum(per_item_loss, weights, enabled):
     if weights is None or enabled is False:
         return per_item_loss.sum()
@@ -360,6 +447,14 @@ def task4_pair_margin_loss(score_diff, targets):
     loss_weight = targets["loss_weight"].to(device=score_diff.device, dtype=score_diff.dtype)
     margin = targets["margin"].to(device=score_diff.device, dtype=score_diff.dtype)
     return (torch.relu(margin - score_diff) * loss_weight).sum()
+
+
+def task4_competitor_pair_loss(score_diff, targets):
+    if targets is None:
+        return score_diff.new_tensor(0.0)
+    loss_weight = targets["loss_weight"].to(device=score_diff.device, dtype=score_diff.dtype)
+    margin = targets["margin"].to(device=score_diff.device, dtype=score_diff.dtype)
+    return (F.softplus(margin - score_diff) * loss_weight).sum()
 
 
 def validate_method_args(args):
@@ -394,6 +489,13 @@ def validate_method_args(args):
     if method_variant in TASK4_PAIR_MARGIN_METHOD_VARIANTS:
         if float(getattr(args, "task4_pair_margin", 0.2)) <= 0:
             raise ValueError("task4_pair_margin must be positive for Task4 pair-margin variants")
+    if method_variant in TASK4_COMPETITOR_PAIR_METHOD_VARIANTS:
+        if float(getattr(args, "task4_competitor_alpha", 0.25)) <= 0:
+            raise ValueError("task4_competitor_alpha must be positive for Task4 competitor-pair variants")
+        if float(getattr(args, "task4_competitor_margin", 0.1)) <= 0:
+            raise ValueError("task4_competitor_margin must be positive for Task4 competitor-pair variants")
+        if int(getattr(args, "task4_competitor_k", 20)) <= 0:
+            raise ValueError("task4_competitor_k must be positive for Task4 competitor-pair variants")
 
 
 def scalar_text(value):
@@ -435,6 +537,9 @@ def build_run_config(args, model):
         "task4_disable_self_contrast_weight": bool(getattr(args, "task4_disable_self_contrast_weight", False)),
         "task4_reweight_contrast": bool(getattr(args, "task4_reweight_contrast", False)),
         "task4_pair_margin": float(getattr(args, "task4_pair_margin", 0.0)),
+        "task4_competitor_alpha": float(getattr(args, "task4_competitor_alpha", 0.0)),
+        "task4_competitor_margin": float(getattr(args, "task4_competitor_margin", 0.0)),
+        "task4_competitor_k": int(getattr(args, "task4_competitor_k", 0)),
         "seed": int(getattr(args, "seed", -1)),
         "num_workers": int(getattr(args, "num_workers", 0)),
         "batch_size": int(getattr(args, "batch_size", 0)),
@@ -650,6 +755,16 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             name: tensor.to(device, non_blocking=non_blocking)
             for name, tensor in task4_pair_margin_targets.items()
         }
+    task4_competitor_pair_targets = load_task4_competitor_pair_targets(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if task4_competitor_pair_targets is not None:
+        task4_competitor_pair_targets = {
+            name: tensor.to(device, non_blocking=non_blocking)
+            for name, tensor in task4_competitor_pair_targets.items()
+        }
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
@@ -670,6 +785,11 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             task4_batch_pair_margin_targets = (
                 {name: tensor[item] for name, tensor in task4_pair_margin_targets.items()}
                 if task4_pair_margin_targets is not None
+                else None
+            )
+            task4_batch_competitor_pair_targets = (
+                {name: tensor[item] for name, tensor in task4_competitor_pair_targets.items()}
+                if task4_competitor_pair_targets is not None
                 else None
             )
             # run model
@@ -740,7 +860,13 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             else:
                 y_ukv2 = weighted_sum(y_ukv2_per_item, category_weights, args.reweight_q_bpr)
             task4_pair_margin_sum = task4_pair_margin_loss(y_q_margin_diff, task4_batch_pair_margin_targets)
-            total_loss = args.lambda1*(contrast_sum+self_contrast_sum) + (1-args.lambda1)*(y_ukv+y_ukv2) + task4_pair_margin_sum
+            task4_competitor_pair_sum = task4_competitor_pair_loss(y_q_margin_diff, task4_batch_competitor_pair_targets)
+            total_loss = (
+                args.lambda1*(contrast_sum+self_contrast_sum)
+                + (1-args.lambda1)*(y_ukv+y_ukv2)
+                + task4_pair_margin_sum
+                + task4_competitor_pair_sum
+            )
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
                 exit(255)
