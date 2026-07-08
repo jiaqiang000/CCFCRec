@@ -35,6 +35,17 @@ def get_args():
             'category_conf_input',
             'adaptive_conf_qbpr',
             'category_conf_fusion_gate',
+            'task4_rsp_high_weight',
+            'task4_acat_high_weight',
+            'task4_acat_shuffle_high_weight',
+            'task4_acat_trainhard_weight',
+            'task4_highdetail_trainhard_weight',
+            'task4_highdetail_trainhard_shuffle_weight',
+            'task4_acat_pairmargin_weight',
+            'task4_acat_rsp_residual_pairmargin',
+            'task4_acat_hardonly_qmargin',
+            'task4_highdetail_pairmargin',
+            'task4_highdetail_pairmargin_shuffle',
         ],
         help='training method variant',
     )
@@ -48,6 +59,13 @@ def get_args():
     parser.add_argument('--category_gate_scale', type=float, default=0.5, help='max residual attr/image scale shift for category confidence fusion gate')
     parser.add_argument('--adaptive_loss_alpha', type=float, default=1.0, help='extra qBPR weight scale for supported weak-category items')
     parser.add_argument('--adaptive_history_max_count', type=int, default=20, help='history length cap for adaptive support confidence')
+    parser.add_argument('--task4_profile_path', type=str, default='', help='Task4 train-safe hard proxy profile CSV')
+    parser.add_argument('--task4_loss_alpha', type=float, default=0.5, help='extra q-side loss weight for Task4 target items')
+    parser.add_argument('--task4_shuffle_seed', type=int, default=43, help='deterministic shuffle seed for Task4 Acat shuffle control')
+    parser.add_argument('--task4_disable_q_bpr_weight', action='store_true', help='disable Task4 q_v_c-user BPR weighting')
+    parser.add_argument('--task4_disable_self_contrast_weight', action='store_true', help='disable Task4 self contrast weighting')
+    parser.add_argument('--task4_reweight_contrast', action='store_true', help='also apply Task4 weights to q_v_c item contrast loss')
+    parser.add_argument('--task4_pair_margin', type=float, default=0.2, help='q_v_c target-user vs competitor-user margin for Task4 pairwise-margin variants')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

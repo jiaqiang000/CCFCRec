@@ -43,6 +43,45 @@ if device.type == 'cuda':
     torch.cuda.set_device(int(os.environ.get('CCFCREC_CUDA_DEVICE', '0')))
 
 
+TASK4_WEIGHT_METHOD_VARIANTS = {
+    "task4_rsp_high_weight",
+    "task4_acat_high_weight",
+    "task4_acat_shuffle_high_weight",
+    "task4_acat_trainhard_weight",
+    "task4_highdetail_trainhard_weight",
+    "task4_highdetail_trainhard_shuffle_weight",
+}
+
+TASK4_PAIR_MARGIN_METHOD_VARIANTS = {
+    "task4_acat_pairmargin_weight",
+    "task4_acat_rsp_residual_pairmargin",
+    "task4_acat_hardonly_qmargin",
+    "task4_highdetail_pairmargin",
+    "task4_highdetail_pairmargin_shuffle",
+}
+
+TASK4_METHOD_VARIANTS = TASK4_WEIGHT_METHOD_VARIANTS | TASK4_PAIR_MARGIN_METHOD_VARIANTS
+
+TASK4_FORBIDDEN_TRAIN_COLUMNS = {
+    "hr@20",
+    "ndcg@20",
+    "baseline_ndcg@20",
+    "margin_proxy",
+    "baseline_margin_proxy",
+    "best_target_rank",
+    "baseline_best_target_rank",
+    "eval_baseline_hard_flag",
+    "high_acat_eval_hard_flag",
+    "proxy_ensemble_score",
+    "proxy_ensemble_score_x",
+    "proxy_ensemble_score_y",
+    "consensus_score",
+    "consensus_score_x",
+    "consensus_score_y",
+    "delta_ndcg@20",
+}
+
+
 def set_random_seed(seed):
     if seed is None or seed < 0:
         return
@@ -84,10 +123,243 @@ def build_adaptive_qbpr_weights(item_genres, support_confidence, args):
     return weights / weights.mean().detach()
 
 
+def uses_task4_item_weights(args):
+    return getattr(args, "method_variant", "baseline") in TASK4_WEIGHT_METHOD_VARIANTS
+
+
+def uses_task4_pair_margin(args):
+    return getattr(args, "method_variant", "baseline") in TASK4_PAIR_MARGIN_METHOD_VARIANTS
+
+
+def _bool_series(series):
+    if series.dtype == bool:
+        return series.fillna(False).astype(bool)
+    text = series.astype(str).str.strip().str.lower()
+    return text.isin({"true", "1", "yes", "y", "t"})
+
+
+def _task4_high_acat_flags(profile):
+    if "high_acat_flag" in profile.columns:
+        return _bool_series(profile["high_acat_flag"])
+    if "s_cat_v3_group" in profile.columns:
+        return profile["s_cat_v3_group"].astype(str).eq("s_cat_v3_strong")
+    raise ValueError("Task4 profile 缺少 high_acat_flag 或 s_cat_v3_group")
+
+
+def _task4_high_detail_flags(profile):
+    if "cat_count_bin" in profile.columns:
+        return profile["cat_count_bin"].astype(str).eq("cat_count_5_plus")
+    if "category_count" in profile.columns:
+        return _numeric_task4_series(profile, "category_count").ge(5)
+    raise ValueError("Task4 profile 缺少 cat_count_bin 或 category_count")
+
+
+def _task4_highdetail_trainhard_flags(profile):
+    if "high_acat_train_safe_hard_flag" not in profile.columns:
+        raise ValueError("Task4 profile 缺少 high_acat_train_safe_hard_flag")
+    return _task4_high_detail_flags(profile) & _bool_series(profile["high_acat_train_safe_hard_flag"])
+
+
+def _task4_shuffle_by_split_and_detail(profile, flags, args, scores=None):
+    shuffle_seed = int(getattr(args, "task4_shuffle_seed", 43))
+    rng = np.random.default_rng(shuffle_seed)
+    flags = pd.Series(flags, index=profile.index).astype(bool)
+    shuffled_flags = pd.Series(False, index=profile.index)
+    shuffled_scores = None if scores is None else pd.Series(0.0, index=profile.index, dtype=float)
+    group_cols = [col for col in ["split", "cat_count_bin"] if col in profile.columns]
+    if not group_cols:
+        group_cols = [None]
+    groups = profile.groupby(group_cols, dropna=False).groups if group_cols != [None] else {None: profile.index}
+    for _, group_index in groups.items():
+        group_index = pd.Index(group_index)
+        permutation = rng.permutation(len(group_index))
+        shuffled_flags.loc[group_index] = flags.loc[group_index].to_numpy(dtype=bool)[permutation]
+        if shuffled_scores is not None:
+            shuffled_scores.loc[group_index] = pd.Series(scores, index=profile.index).loc[group_index].to_numpy(dtype=float)[permutation]
+    if shuffled_scores is None:
+        return shuffled_flags
+    return shuffled_flags, shuffled_scores
+
+
+def _task4_variant_flags(profile, args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant == "task4_rsp_high_weight":
+        if "RSP_group" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 RSP_group")
+        return profile["RSP_group"].astype(str).eq("RSP_high")
+    if method_variant == "task4_acat_high_weight":
+        return _task4_high_acat_flags(profile)
+    if method_variant == "task4_acat_trainhard_weight":
+        if "high_acat_train_safe_hard_flag" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 high_acat_train_safe_hard_flag")
+        return _bool_series(profile["high_acat_train_safe_hard_flag"])
+    if method_variant == "task4_highdetail_trainhard_weight":
+        return _task4_highdetail_trainhard_flags(profile)
+    if method_variant == "task4_highdetail_trainhard_shuffle_weight":
+        flags = _task4_highdetail_trainhard_flags(profile)
+        return _task4_high_detail_flags(profile) & _task4_shuffle_by_split_and_detail(profile, flags, args)
+    if method_variant == "task4_acat_shuffle_high_weight":
+        shuffle_seed = int(getattr(args, "task4_shuffle_seed", 43))
+        rng = np.random.default_rng(shuffle_seed)
+        flags = _task4_high_acat_flags(profile).astype(bool)
+        shuffled = pd.Series(False, index=profile.index)
+        if "split" in profile.columns:
+            for _, split_index in profile.groupby("split", dropna=False).groups.items():
+                values = flags.loc[split_index].to_numpy(dtype=bool).copy()
+                rng.shuffle(values)
+                shuffled.loc[split_index] = values
+        else:
+            values = flags.to_numpy(dtype=bool).copy()
+            rng.shuffle(values)
+            shuffled.loc[:] = values
+        return shuffled
+    raise ValueError(f"unsupported Task4 method_variant={method_variant}")
+
+
+def _numeric_task4_series(profile, column):
+    if column not in profile.columns:
+        raise ValueError(f"Task4 profile 缺少 {column}")
+    return pd.to_numeric(profile[column], errors="coerce").fillna(0.0)
+
+
+def _clip01(series):
+    return _numeric_task4_series(pd.DataFrame({"value": series}), "value").clip(lower=0.0, upper=1.0)
+
+
+def _task4_pair_margin_flags_and_scores(profile, args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant == "task4_acat_pairmargin_weight":
+        if "high_acat_train_safe_hard_flag" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 high_acat_train_safe_hard_flag")
+        flags = _bool_series(profile["high_acat_train_safe_hard_flag"])
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+        scores = (acat_score + hard_score) / 2.0
+        return flags, scores
+    if method_variant == "task4_acat_rsp_residual_pairmargin":
+        if "high_acat_train_safe_hard_flag" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 high_acat_train_safe_hard_flag")
+        if "RSP_group" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 RSP_group")
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        rsp_group = profile["RSP_group"].astype(str)
+        group_mean = acat_score.groupby(rsp_group, dropna=False).transform("mean")
+        residual = (acat_score - group_mean).clip(lower=0.0)
+        max_residual = float(residual.max()) if len(residual) else 0.0
+        residual_score = residual / max_residual if max_residual > 0 else residual
+        flags = _bool_series(profile["high_acat_train_safe_hard_flag"]) & residual.gt(0)
+        return flags, residual_score.clip(lower=0.0, upper=1.0)
+    if method_variant == "task4_acat_hardonly_qmargin":
+        if "train_safe_hard_proxy_high_flag" not in profile.columns:
+            raise ValueError("Task4 profile 缺少 train_safe_hard_proxy_high_flag")
+        flags = _task4_high_acat_flags(profile) & _bool_series(profile["train_safe_hard_proxy_high_flag"])
+        scores = pd.Series(1.0, index=profile.index)
+        return flags, scores
+    if method_variant == "task4_highdetail_pairmargin":
+        flags = _task4_highdetail_trainhard_flags(profile)
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+        scores = (acat_score + hard_score) / 2.0
+        return flags, scores
+    if method_variant == "task4_highdetail_pairmargin_shuffle":
+        flags = _task4_highdetail_trainhard_flags(profile)
+        acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+        hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+        scores = (acat_score + hard_score) / 2.0
+        shuffled_flags, shuffled_scores = _task4_shuffle_by_split_and_detail(profile, flags, args, scores=scores)
+        return _task4_high_detail_flags(profile) & shuffled_flags, _clip01(shuffled_scores)
+    raise ValueError(f"unsupported Task4 pair-margin method_variant={method_variant}")
+
+
+def build_task4_item_weights_from_profile(profile, item_serialize_dict, args, item_number=None):
+    if not uses_task4_item_weights(args):
+        return None
+    if "raw_asin" not in profile.columns:
+        raise ValueError("Task4 profile 缺少 raw_asin")
+    if not item_serialize_dict:
+        raise ValueError("item_serialize_dict must not be empty")
+    if item_number is None:
+        item_number = max(item_serialize_dict.values()) + 1
+    alpha = float(getattr(args, "task4_loss_alpha", 0.5))
+    if alpha <= 0:
+        raise ValueError("task4_loss_alpha must be positive for Task4 variants")
+
+    work = profile.copy().sort_values("raw_asin").reset_index(drop=True)
+    flags = _task4_variant_flags(work, args).astype(bool)
+    weights = torch.ones(int(item_number), dtype=torch.float32)
+    for raw_asin, flag in zip(work["raw_asin"], flags):
+        serial_item = item_serialize_dict.get(raw_asin)
+        if serial_item is None:
+            continue
+        weights[int(serial_item)] = 1.0 + alpha * float(flag)
+    return weights / weights.mean().detach()
+
+
+def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=None):
+    if not uses_task4_pair_margin(args):
+        return None
+    if "raw_asin" not in profile.columns:
+        raise ValueError("Task4 profile 缺少 raw_asin")
+    if not item_serialize_dict:
+        raise ValueError("item_serialize_dict must not be empty")
+    if item_number is None:
+        item_number = max(item_serialize_dict.values()) + 1
+    alpha = float(getattr(args, "task4_loss_alpha", 0.5))
+    if alpha <= 0:
+        raise ValueError("task4_loss_alpha must be positive for Task4 variants")
+    base_margin = float(getattr(args, "task4_pair_margin", 0.2))
+    if base_margin <= 0:
+        raise ValueError("task4_pair_margin must be positive for Task4 pair-margin variants")
+
+    work = profile.copy().sort_values("raw_asin").reset_index(drop=True)
+    flags, scores = _task4_pair_margin_flags_and_scores(work, args)
+    scores = _clip01(scores)
+    loss_weight = torch.zeros(int(item_number), dtype=torch.float32)
+    margin = torch.full((int(item_number),), base_margin, dtype=torch.float32)
+    for raw_asin, flag, score in zip(work["raw_asin"], flags.astype(bool), scores):
+        serial_item = item_serialize_dict.get(raw_asin)
+        if serial_item is None:
+            continue
+        serial_item = int(serial_item)
+        score = float(score)
+        if bool(flag):
+            loss_weight[serial_item] = alpha * (0.5 + 0.5 * score)
+            margin[serial_item] = base_margin * (1.0 + score)
+    return {"loss_weight": loss_weight, "margin": margin}
+
+
+def load_task4_item_weights(item_serialize_dict, args, item_number=None):
+    if not uses_task4_item_weights(args):
+        return None
+    profile_path = getattr(args, "task4_profile_path", "")
+    if not profile_path:
+        raise ValueError("task4_profile_path is required for Task4 variants")
+    profile = pd.read_csv(profile_path)
+    return build_task4_item_weights_from_profile(profile, item_serialize_dict, args, item_number=item_number)
+
+
+def load_task4_pair_margin_targets(item_serialize_dict, args, item_number=None):
+    if not uses_task4_pair_margin(args):
+        return None
+    profile_path = getattr(args, "task4_profile_path", "")
+    if not profile_path:
+        raise ValueError("task4_profile_path is required for Task4 variants")
+    profile = pd.read_csv(profile_path)
+    return build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=item_number)
+
+
 def weighted_sum(per_item_loss, weights, enabled):
     if weights is None or enabled is False:
         return per_item_loss.sum()
     return (per_item_loss * weights).sum()
+
+
+def task4_pair_margin_loss(score_diff, targets):
+    if targets is None:
+        return score_diff.new_tensor(0.0)
+    loss_weight = targets["loss_weight"].to(device=score_diff.device, dtype=score_diff.dtype)
+    margin = targets["margin"].to(device=score_diff.device, dtype=score_diff.dtype)
+    return (torch.relu(margin - score_diff) * loss_weight).sum()
 
 
 def validate_method_args(args):
@@ -114,6 +386,14 @@ def validate_method_args(args):
             raise ValueError("adaptive_loss_alpha must be positive for adaptive_conf_qbpr")
         if int(getattr(args, "adaptive_history_max_count", 20)) <= 0:
             raise ValueError("adaptive_history_max_count must be positive for adaptive_conf_qbpr")
+    if method_variant in TASK4_METHOD_VARIANTS:
+        if not str(getattr(args, "task4_profile_path", "")).strip():
+            raise ValueError("task4_profile_path is required for Task4 variants")
+        if float(getattr(args, "task4_loss_alpha", 0.5)) <= 0:
+            raise ValueError("task4_loss_alpha must be positive for Task4 variants")
+    if method_variant in TASK4_PAIR_MARGIN_METHOD_VARIANTS:
+        if float(getattr(args, "task4_pair_margin", 0.2)) <= 0:
+            raise ValueError("task4_pair_margin must be positive for Task4 pair-margin variants")
 
 
 def scalar_text(value):
@@ -148,8 +428,20 @@ def build_run_config(args, model):
         "weak_loss_alpha": float(getattr(args, "weak_loss_alpha", 0.0)),
         "adaptive_loss_alpha": float(getattr(args, "adaptive_loss_alpha", 0.0)),
         "adaptive_history_max_count": int(getattr(args, "adaptive_history_max_count", 0)),
+        "task4_profile_path": str(getattr(args, "task4_profile_path", "")),
+        "task4_loss_alpha": float(getattr(args, "task4_loss_alpha", 0.0)),
+        "task4_shuffle_seed": int(getattr(args, "task4_shuffle_seed", 43)),
+        "task4_disable_q_bpr_weight": bool(getattr(args, "task4_disable_q_bpr_weight", False)),
+        "task4_disable_self_contrast_weight": bool(getattr(args, "task4_disable_self_contrast_weight", False)),
+        "task4_reweight_contrast": bool(getattr(args, "task4_reweight_contrast", False)),
+        "task4_pair_margin": float(getattr(args, "task4_pair_margin", 0.0)),
         "seed": int(getattr(args, "seed", -1)),
         "num_workers": int(getattr(args, "num_workers", 0)),
+        "batch_size": int(getattr(args, "batch_size", 0)),
+        "save_batch_time": int(getattr(args, "save_batch_time", 0)),
+        "validate_batch_size": int(getattr(args, "validate_batch_size", 0)),
+        "negative_sampling_mode": str(getattr(args, "negative_sampling_mode", "")),
+        "negative_sampling_cache_size": int(getattr(args, "negative_sampling_cache_size", 0)),
     }
 
 
@@ -341,6 +633,23 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
     non_blocking = device.type == 'cuda' and getattr(args, 'pin_memory', False)
     item_category_tensor = train_loader.dataset.item_category_tensor.to(device, non_blocking=non_blocking)
     item_image_feature_tensor = train_loader.dataset.item_image_feature_tensor.to(device, non_blocking=non_blocking)
+    task4_item_weights = load_task4_item_weights(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if task4_item_weights is not None:
+        task4_item_weights = task4_item_weights.to(device, non_blocking=non_blocking)
+    task4_pair_margin_targets = load_task4_pair_margin_targets(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if task4_pair_margin_targets is not None:
+        task4_pair_margin_targets = {
+            name: tensor.to(device, non_blocking=non_blocking)
+            for name, tensor in task4_pair_margin_targets.items()
+        }
     for i_epoch in range(args.epoch):
         i_batch = 0
         batch_time = time.time()
@@ -357,6 +666,12 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             support_confidence = support_confidence.to(device, non_blocking=non_blocking)
             item_genres = item_category_tensor[item]
             item_img_feature = item_image_feature_tensor[item]
+            task4_batch_weights = task4_item_weights[item] if task4_item_weights is not None else None
+            task4_batch_pair_margin_targets = (
+                {name: tensor[item] for name, tensor in task4_pair_margin_targets.items()}
+                if task4_pair_margin_targets is not None
+                else None
+            )
             # run model
             q_v_c = model(item_genres, item_img_feature, user.shape[0])
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)
@@ -376,7 +691,10 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             contrast_examples_num = contrast_val.shape[0] * contrast_val.shape[1]
             contrast_per_item = torch.sum(contrast_val, dim=1) / contrast_val.shape[1]
             category_weights = build_category_reweight(item_genres, args)
-            contrast_sum = weighted_sum(contrast_per_item, category_weights, args.reweight_contrast)
+            if task4_batch_weights is not None:
+                contrast_sum = weighted_sum(contrast_per_item, task4_batch_weights, getattr(args, "task4_reweight_contrast", False))
+            else:
+                contrast_sum = weighted_sum(contrast_per_item, category_weights, args.reweight_contrast)
             '''
             contrast self
             '''
@@ -389,7 +707,14 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                     args.tau * torch.norm(q_v_c, dim=1) * torch.norm(item_emb, dim=1))
             self_pos_contrast_exp = torch.exp(self_pos_contrast_mul)  # shape = 1024*1
             self_contrast_val = -torch.log(self_pos_contrast_exp/(self_pos_contrast_exp+self_neg_contrast_sum))
-            self_contrast_sum = weighted_sum(self_contrast_val, category_weights, args.reweight_self_contrast)
+            if task4_batch_weights is not None:
+                self_contrast_sum = weighted_sum(
+                    self_contrast_val,
+                    task4_batch_weights,
+                    not getattr(args, "task4_disable_self_contrast_weight", False),
+                )
+            else:
+                self_contrast_sum = weighted_sum(self_contrast_val, category_weights, args.reweight_self_contrast)
             # rank loss
             user_emb = model.user_embedding[user]
             item_emb = model.item_embedding[item]
@@ -401,13 +726,21 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             # 使用属性生成item嵌入，再做一个bpr排序
             y_uv2 = torch.mul(q_v_c, user_emb).sum(dim=1)
             y_kv2 = torch.mul(q_v_c, neg_user_emb).sum(dim=1)
+            y_q_margin_diff = y_uv2 - y_kv2
             y_ukv2_per_item = -logsigmoid(y_uv2 - y_kv2)
             adaptive_qbpr_weights = build_adaptive_qbpr_weights(item_genres, support_confidence, args)
             if adaptive_qbpr_weights is not None:
                 y_ukv2 = weighted_sum(y_ukv2_per_item, adaptive_qbpr_weights, True)
+            elif task4_batch_weights is not None:
+                y_ukv2 = weighted_sum(
+                    y_ukv2_per_item,
+                    task4_batch_weights,
+                    not getattr(args, "task4_disable_q_bpr_weight", False),
+                )
             else:
                 y_ukv2 = weighted_sum(y_ukv2_per_item, category_weights, args.reweight_q_bpr)
-            total_loss = args.lambda1*(contrast_sum+self_contrast_sum) + (1-args.lambda1)*(y_ukv+y_ukv2)
+            task4_pair_margin_sum = task4_pair_margin_loss(y_q_margin_diff, task4_batch_pair_margin_targets)
+            total_loss = args.lambda1*(contrast_sum+self_contrast_sum) + (1-args.lambda1)*(y_ukv+y_ukv2) + task4_pair_margin_sum
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
                 exit(255)
