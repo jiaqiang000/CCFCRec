@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 os.environ["CCFCREC_DEVICE"] = "cpu"
@@ -20,8 +21,11 @@ from model import (
     build_task4_competitor_pair_targets_from_profile,
     build_task4_pair_margin_targets_from_profile,
     build_task4_item_weights_from_profile,
+    load_task4_boundary_competitors,
+    resolve_task4_competitor_user_ids,
     task4_competitor_pair_loss,
     task4_pair_margin_loss,
+    uses_task4_boundary_competitor_pair,
     uses_task4_competitor_pair,
     uses_task4_item_weights,
     uses_task4_pair_margin,
@@ -60,6 +64,7 @@ def make_args(method_variant):
         task4_competitor_alpha=0.25,
         task4_competitor_margin=0.1,
         task4_competitor_k=20,
+        task4_boundary_competitor_cache_path="/tmp/task4_boundary_cache.csv",
         seed=43,
         num_workers=0,
         batch_size=1024,
@@ -357,6 +362,41 @@ class Task4AvailabilityWeightsTest(unittest.TestCase):
             self.assertFalse(uses_task4_pair_margin(args))
             validate_method_args(args)
 
+    def test_boundary_competitor_variants_are_registered_and_require_cache(self):
+        for method_variant in {
+            "task4_boundary_competitor_pair",
+            "task4_boundary_competitor_pair_shuffle",
+            "task4_boundary_competitor_pair_rsp_control",
+            "task4_boundary_competitor_pair_acat_control",
+        }:
+            args = make_args(method_variant)
+            self.assertIn(method_variant, TASK4_METHOD_VARIANTS)
+            self.assertTrue(uses_task4_competitor_pair(args))
+            self.assertTrue(uses_task4_boundary_competitor_pair(args))
+            self.assertFalse(uses_task4_item_weights(args))
+            self.assertFalse(uses_task4_pair_margin(args))
+            validate_method_args(args)
+
+            args.task4_boundary_competitor_cache_path = ""
+            with self.assertRaises(ValueError):
+                validate_method_args(args)
+
+    def test_boundary_competitor_targets_reuse_competitor_pair_masks(self):
+        item_map = {"a": 0, "b": 1, "c": 2, "d": 3}
+        real = build_task4_competitor_pair_targets_from_profile(
+            make_profile(),
+            item_map,
+            make_args("task4_competitor_pair"),
+        )
+        boundary = build_task4_competitor_pair_targets_from_profile(
+            make_profile(),
+            item_map,
+            make_args("task4_boundary_competitor_pair"),
+        )
+
+        torch.testing.assert_close(real["loss_weight"], boundary["loss_weight"])
+        torch.testing.assert_close(real["margin"], boundary["margin"])
+
     def test_competitor_pair_targets_highdetail_trainhard_items(self):
         profile = make_profile()
         profile.loc[profile["raw_asin"] == "b", "high_acat_train_safe_hard_flag"] = True
@@ -426,6 +466,43 @@ class Task4AvailabilityWeightsTest(unittest.TestCase):
 
         torch.testing.assert_close(loss, expected)
 
+    def test_boundary_competitor_cache_maps_raw_user_ids(self):
+        with TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "boundary_cache.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "raw_asin": "a",
+                        "boundary_competitor_user": "user_c",
+                        "boundary_competitor_serial_user": 999,
+                    },
+                    {
+                        "raw_asin": "missing_item",
+                        "boundary_competitor_user": "user_b",
+                    },
+                ]
+            ).to_csv(cache_path, index=False)
+            args = make_args("task4_boundary_competitor_pair")
+            args.task4_boundary_competitor_cache_path = str(cache_path)
+
+            boundary = load_task4_boundary_competitors(
+                {"a": 0, "b": 1},
+                {"user_a": 0, "user_b": 1, "user_c": 2},
+                args,
+                item_number=2,
+            )
+
+        self.assertEqual(boundary.tolist(), [2, -1])
+
+    def test_boundary_competitor_user_resolution_falls_back_to_batch_negative(self):
+        item = torch.tensor([0, 1, 2])
+        neg_user = torch.tensor([10, 11, 12])
+        boundary = torch.tensor([2, -1, 5])
+
+        resolved = resolve_task4_competitor_user_ids(item, neg_user, boundary)
+
+        self.assertEqual(resolved.tolist(), [2, 11, 5])
+
     def test_run_config_records_competitor_pair_params(self):
         args = make_args("task4_competitor_pair")
         model = CCFCRec(args)
@@ -435,6 +512,14 @@ class Task4AvailabilityWeightsTest(unittest.TestCase):
         self.assertEqual(config["task4_competitor_alpha"], 0.25)
         self.assertEqual(config["task4_competitor_margin"], 0.1)
         self.assertEqual(config["task4_competitor_k"], 20)
+
+    def test_run_config_records_boundary_competitor_cache_path(self):
+        args = make_args("task4_boundary_competitor_pair")
+        model = CCFCRec(args)
+
+        config = build_run_config(args, model)
+
+        self.assertEqual(config["task4_boundary_competitor_cache_path"], "/tmp/task4_boundary_cache.csv")
 
 
 if __name__ == "__main__":
