@@ -159,6 +159,60 @@ def test_baseline_comparison_reports_absolute_and_percent_delta() -> None:
     assert decision["real_pct_best_ndcg@20_vs_baseline"] == -20.0
 
 
+def test_baseline_summary_records_validation_cold_start_scope() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        baseline_csv = root / "baseline_result.csv"
+        validate_csv = root / "validate_rating.csv"
+        train_csv = root / "train_rating.csv"
+        pd.DataFrame(
+            [
+                {"checkpoint_index": 1, "epoch": 1, "hr@20": 0.10, "ndcg@20": 0.20},
+                {"checkpoint_index": 2, "epoch": 2, "hr@20": 0.12, "ndcg@20": 0.25},
+            ]
+        ).to_csv(baseline_csv, index=False)
+        pd.DataFrame(
+            [
+                {"reviewerID": "u1", "asin": "val-a", "rating": 5.0},
+                {"reviewerID": "u2", "asin": "val-a", "rating": 4.0},
+                {"reviewerID": "u3", "asin": "val-b", "rating": 5.0},
+            ]
+        ).to_csv(validate_csv, index=False)
+        pd.DataFrame(
+            [
+                {"reviewerID": "u1", "asin": "train-a", "rating": 5.0},
+                {"reviewerID": "u2", "asin": "train-b", "rating": 4.0},
+            ]
+        ).to_csv(train_csv, index=False)
+
+        baseline = build_baseline_summary(baseline_csv, validate_csv, train_csv)
+
+    comparison = build_baseline_comparison(
+        pd.DataFrame(
+            [
+                {
+                    "run_label": "R5a025_real",
+                    "role": "real",
+                    "method_variant": "task4_boundary_competitor_pair",
+                    "best_ndcg@20": 0.20,
+                    "last_ndcg@20": 0.18,
+                    "best_hr@20": 0.09,
+                    "last_hr@20": 0.08,
+                }
+            ]
+        ),
+        baseline,
+    )
+
+    assert baseline["metric_scope"] == "validation_split_all_unique_cold_start_items"
+    assert baseline["evaluation_item_count"] == 2
+    assert baseline["evaluation_interaction_count"] == 3
+    assert baseline["train_item_overlap_count"] == 0
+    assert baseline["is_cold_start_item_split"] is True
+    assert comparison.iloc[0]["metric_scope"] == "validation_split_all_unique_cold_start_items"
+    assert comparison.iloc[0]["evaluation_item_count"] == 2
+
+
 def test_route_marks_incomplete_when_required_role_missing() -> None:
     summary = pd.DataFrame(
         [

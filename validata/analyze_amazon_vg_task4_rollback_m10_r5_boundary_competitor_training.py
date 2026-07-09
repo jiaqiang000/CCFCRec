@@ -22,11 +22,14 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path("/Users/luojiaqiang/Documents/Obsidian Vault/科研/CCFCRec对比学习思路")
+CODE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "temp_202607_实验文件记录" / "temp_20260709"
 DEFAULT_RESULT_ROOT = Path(
     "/Volumes/MyPassport/CCFCRec对比学习思路硬盘/实验记录硬盘/ccfcrec_result/"
     "2026-07-09_124756_task4_boundary_competitor_m10r5_seed43_workers8_fast_uniform_mps_100epoch"
 )
+DEFAULT_VALIDATE_CSV = CODE_ROOT / "Amazon VG" / "data" / "validate_rating.csv"
+DEFAULT_TRAIN_CSV = CODE_ROOT / "Amazon VG" / "data" / "train_rating.csv"
 DEFAULT_BASELINE_RESULT = (
     PROJECT_ROOT
     / "实验记录"
@@ -292,13 +295,60 @@ def _read_baseline_result(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def build_baseline_summary(baseline_result: Path | str) -> dict[str, Any]:
+def build_metric_scope_summary(validate_csv: Path | str | None, train_csv: Path | str | None) -> dict[str, Any]:
+    scope = {
+        "evaluation_split": "validation",
+        "metric_scope": "validation_split_all_unique_cold_start_items",
+        "metric_scope_explanation": (
+            "Macro-average over every unique asin in Amazon VG/data/validate_rating.csv; "
+            "no test split, no training-item/full-catalog metric, and no Task4 subgroup filter."
+        ),
+        "aggregation_unit": "unique_validation_item_macro_average",
+        "group_filter": "none",
+        "cold_start_scope_note": (
+            "The validation items are disjoint from train_rating.csv items, so this is the whole validation "
+            "cold-start item split rather than a selected cold-start subgroup."
+        ),
+    }
+    if validate_csv is None:
+        return scope
+    validate_path = Path(validate_csv).expanduser()
+    scope["evaluation_csv"] = str(validate_path)
+    if not validate_path.exists():
+        scope["evaluation_csv_exists"] = False
+        return scope
+
+    validate = pd.read_csv(validate_path)
+    scope["evaluation_csv_exists"] = True
+    scope["evaluation_interaction_count"] = int(len(validate))
+    scope["evaluation_item_count"] = int(validate["asin"].nunique())
+    scope["evaluation_user_count"] = int(validate["reviewerID"].nunique())
+    if train_csv is not None:
+        train_path = Path(train_csv).expanduser()
+        scope["train_csv"] = str(train_path)
+        if train_path.exists():
+            train = pd.read_csv(train_path, usecols=["asin"])
+            overlap = set(validate["asin"].dropna()) & set(train["asin"].dropna())
+            scope["train_csv_exists"] = True
+            scope["train_item_count"] = int(train["asin"].nunique())
+            scope["train_item_overlap_count"] = int(len(overlap))
+            scope["is_cold_start_item_split"] = len(overlap) == 0
+        else:
+            scope["train_csv_exists"] = False
+    return scope
+
+
+def build_baseline_summary(
+    baseline_result: Path | str,
+    validate_csv: Path | str | None = None,
+    train_csv: Path | str | None = None,
+) -> dict[str, Any]:
     path = Path(baseline_result).expanduser()
     result = _read_baseline_result(path)
     best_ndcg = _best_row(result, "ndcg@20")
     best_hr = _best_row(result, "hr@20")
     last = result.sort_values(["epoch", "checkpoint_index"]).iloc[-1]
-    return {
+    summary = {
         "baseline_result": str(path),
         "baseline_label": "baseline_seed43_workers8_fast_uniform",
         "rows": int(len(result)),
@@ -312,6 +362,8 @@ def build_baseline_summary(baseline_result: Path | str) -> dict[str, Any]:
         "last_ndcg@20": _round_float(last["ndcg@20"]),
         "last_hr@20": _round_float(last["hr@20"]),
     }
+    summary.update(build_metric_scope_summary(validate_csv, train_csv))
+    return summary
 
 
 def _pct_delta(delta: float, baseline: float) -> float:
@@ -336,6 +388,10 @@ def build_baseline_comparison(summary: pd.DataFrame, baseline: dict[str, Any]) -
                 "run_label": row["run_label"],
                 "role": row["role"],
                 "method_variant": row["method_variant"],
+                "evaluation_split": baseline.get("evaluation_split"),
+                "metric_scope": baseline.get("metric_scope"),
+                "group_filter": baseline.get("group_filter"),
+                "evaluation_item_count": baseline.get("evaluation_item_count"),
                 "baseline_best_ndcg@20": _round_float(baseline_best_ndcg),
                 "branch_best_ndcg@20": _round_float(row["best_ndcg@20"]),
                 "delta_best_ndcg@20_vs_baseline": _round_float(best_ndcg_delta),
@@ -504,6 +560,10 @@ def write_result_markdown(
     decision: dict[str, Any],
     manifest_name: str,
 ) -> None:
+    evaluation_csv = baseline_summary.get("evaluation_csv", "unknown")
+    evaluation_item_count = baseline_summary.get("evaluation_item_count", "unknown")
+    evaluation_interaction_count = baseline_summary.get("evaluation_interaction_count", "unknown")
+    train_item_overlap_count = baseline_summary.get("train_item_overlap_count", "unknown")
     content = f"""---
 title: {run_stamp} CCFCRec Amazon-VG M10-R5 boundary competitor training 结果
 date: {run_stamp[:10]}
@@ -545,6 +605,14 @@ open_alpha_sweep = {decision["open_alpha_sweep"]}
 
 解释：M10-R5 boundary competitor（边界竞争用户）相对 shuffle（打乱负控）有明显净收益，但所有分支相对 baseline（基线）都有显著下降；real（真实载体）还输给 RSP control（RSP 对照），因此不能证明收益来自 Acat/recoverability（类别可用性/可恢复性）本身。
 
+## Metric Scope（指标口径）
+
+> [!warning] 口径说明
+> 本报告的 Validation Summary（验证摘要）和 Baseline Comparison（基线对比）都使用同一 evaluation split（评估划分）：`{evaluation_csv}`。
+> aggregation（聚合方式）：对该 CSV（逗号分隔文件）中的全部 unique asin（唯一物品）逐 item（物品）计算后做 macro average（宏平均）。
+> item scope（物品口径）：{evaluation_item_count} 个 validation cold-start item（验证集冷启动物品），{evaluation_interaction_count} 条 validation interaction（验证交互），与 train_rating.csv（训练交互文件）的 item（物品）重叠数为 {train_item_overlap_count}。
+> 这不是 test split（测试集划分）指标，不是全训练物品/全目录物品指标，也不是 high-Acat（高类别可用性）、RSP（随机/流行度相关对照信号）、near-cutoff（接近截断线）等 Task4 subgroup（第四任务子组）指标。
+
 ## Route Decision（路线决策）
 
 ```json
@@ -570,8 +638,9 @@ open_alpha_sweep = {decision["open_alpha_sweep"]}
 > [!info] 字段说明
 > `delta_best_ndcg@20_vs_baseline`：当前分支 best NDCG@20（最佳前20归一化折损累计增益）减 baseline（基线）best NDCG@20。
 > `pct_best_ndcg@20_vs_baseline`：上述差值除以 baseline（基线）best NDCG@20 后的百分比变化。
+> `metric_scope`：该 baseline（基线）对比的评估口径；本报告为 validation split（验证集划分）全体 cold-start item（冷启动物品）宏平均。
 
-{md_table(baseline_comparison, ["run_label", "role", "branch_best_ndcg@20", "baseline_best_ndcg@20", "delta_best_ndcg@20_vs_baseline", "pct_best_ndcg@20_vs_baseline", "branch_last_ndcg@20", "baseline_last_ndcg@20", "delta_last_ndcg@20_vs_baseline", "pct_last_ndcg@20_vs_baseline", "branch_best_hr@20", "baseline_best_hr@20", "delta_best_hr@20_vs_baseline", "pct_best_hr@20_vs_baseline"], max_rows=20)}
+{md_table(baseline_comparison, ["run_label", "role", "metric_scope", "evaluation_item_count", "branch_best_ndcg@20", "baseline_best_ndcg@20", "delta_best_ndcg@20_vs_baseline", "pct_best_ndcg@20_vs_baseline", "branch_last_ndcg@20", "baseline_last_ndcg@20", "delta_last_ndcg@20_vs_baseline", "pct_last_ndcg@20_vs_baseline", "branch_best_hr@20", "baseline_best_hr@20", "delta_best_hr@20_vs_baseline", "pct_best_hr@20_vs_baseline"], max_rows=20)}
 """
     path.write_text(content, encoding="utf-8")
 
@@ -602,7 +671,9 @@ def run(args: argparse.Namespace) -> Outputs:
     curve = build_validation_curve(result_root)
     summary = build_validation_summary(curve)
     comparison = build_pair_comparison(summary)
-    baseline_summary = build_baseline_summary(args.baseline_result)
+    validate_csv = Path(args.validate_csv).expanduser().resolve()
+    train_csv = Path(args.train_csv).expanduser().resolve()
+    baseline_summary = build_baseline_summary(args.baseline_result, validate_csv, train_csv)
     baseline_comparison = build_baseline_comparison(summary, baseline_summary)
     decision = decide_route(summary, comparison, baseline_comparison)
 
@@ -632,6 +703,8 @@ def run(args: argparse.Namespace) -> Outputs:
         "analysis_script": ANALYSIS_SCRIPT,
         "result_root": str(result_root),
         "baseline_result": str(Path(args.baseline_result).expanduser()),
+        "validate_csv": str(validate_csv),
+        "train_csv": str(train_csv),
         "design_note": R5_DESIGN_NOTE_NAME,
         "audit_route_note": R5_AUDIT_ROUTE_NOTE_NAME,
         "training_route_note": R4_TRAINING_ROUTE_NOTE_NAME,
@@ -653,6 +726,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze M10-R5 boundary competitor training results.")
     parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
     parser.add_argument("--baseline-result", default=str(DEFAULT_BASELINE_RESULT))
+    parser.add_argument("--validate-csv", default=str(DEFAULT_VALIDATE_CSV))
+    parser.add_argument("--train-csv", default=str(DEFAULT_TRAIN_CSV))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--run-stamp", default="")
     return parser
