@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 
 from analyze_amazon_vg_task4_rollback_m10_r5_boundary_competitor_training import (
+    build_baseline_comparison,
+    build_baseline_summary,
     build_pair_comparison,
     build_validation_curve,
     build_validation_summary,
@@ -103,6 +105,58 @@ def test_route_marks_current_shape_as_rsp_control_dominated() -> None:
     assert decision["not_losing_acat_control"] is True
     assert decision["route"] == "r5_boundary_competitor_rsp_control_dominated"
     assert decision["open_multi_seed"] is False
+
+
+def test_baseline_comparison_reports_absolute_and_percent_delta() -> None:
+    with TemporaryDirectory() as tmpdir:
+        baseline_csv = Path(tmpdir) / "baseline_result.csv"
+        pd.DataFrame(
+            [
+                {"checkpoint_index": 1, "epoch": 1, "hr@20": 0.10, "ndcg@20": 0.20},
+                {"checkpoint_index": 2, "epoch": 2, "hr@20": 0.12, "ndcg@20": 0.25},
+            ]
+        ).to_csv(baseline_csv, index=False)
+        baseline = build_baseline_summary(baseline_csv)
+
+    summary = pd.DataFrame(
+        [
+            {
+                "run_label": "R5a025_real",
+                "role": "real",
+                "method_variant": "task4_boundary_competitor_pair",
+                "best_ndcg@20": 0.20,
+                "last_ndcg@20": 0.18,
+                "best_hr@20": 0.09,
+                "last_hr@20": 0.08,
+            }
+        ]
+    )
+    comparison = build_baseline_comparison(summary, baseline)
+    row = comparison.iloc[0]
+    decision = decide_route(
+        pd.DataFrame(
+            [
+                {"role": "real", "best_ndcg@20": 0.20, "best_hr@20": 0.09, "best_ndcg_epoch": 30, "last_ndcg@20": 0.18, "completed_expected_epoch": True, "early_transient_peak_flag": False},
+                {"role": "shuffle", "best_ndcg@20": 0.10, "best_hr@20": 0.08, "best_ndcg_epoch": 30, "last_ndcg@20": 0.10, "completed_expected_epoch": True, "early_transient_peak_flag": False},
+                {"role": "rsp_control", "best_ndcg@20": 0.19, "best_hr@20": 0.08, "best_ndcg_epoch": 30, "last_ndcg@20": 0.10, "completed_expected_epoch": True, "early_transient_peak_flag": False},
+                {"role": "acat_control", "best_ndcg@20": 0.19, "best_hr@20": 0.08, "best_ndcg_epoch": 30, "last_ndcg@20": 0.10, "completed_expected_epoch": True, "early_transient_peak_flag": False},
+            ]
+        ),
+        pd.DataFrame(
+            [
+                {"comparison": "real_minus_shuffle", "delta_best_ndcg@20": 0.10},
+                {"comparison": "real_minus_rsp_control", "delta_best_ndcg@20": 0.01},
+                {"comparison": "real_minus_acat_control", "delta_best_ndcg@20": 0.01},
+            ]
+        ),
+        comparison,
+    )
+
+    assert baseline["best_ndcg@20"] == 0.25
+    assert row["delta_best_ndcg@20_vs_baseline"] == -0.05
+    assert row["pct_best_ndcg@20_vs_baseline"] == -20.0
+    assert decision["real_minus_baseline_best_ndcg@20"] == -0.05
+    assert decision["real_pct_best_ndcg@20_vs_baseline"] == -20.0
 
 
 def test_route_marks_incomplete_when_required_role_missing() -> None:

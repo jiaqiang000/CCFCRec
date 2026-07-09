@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import tarfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,12 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "temp_202607_实验文件记录" / "temp_20
 DEFAULT_RESULT_ROOT = Path(
     "/Volumes/MyPassport/CCFCRec对比学习思路硬盘/实验记录硬盘/ccfcrec_result/"
     "2026-07-09_124756_task4_boundary_competitor_m10r5_seed43_workers8_fast_uniform_mps_100epoch"
+)
+DEFAULT_BASELINE_RESULT = (
+    PROJECT_ROOT
+    / "实验记录"
+    / "2026-06-27 162750 baseline-seed43-workers8-fast-uniform-commit873a171"
+    / "baseline_seed43_workers8_fast_uniform_commit873a171_2026-06-27_15_54_28_slim_best74_last100.tar.gz"
 )
 ANALYSIS_SCRIPT = "validata/analyze_amazon_vg_task4_rollback_m10_r5_boundary_competitor_training.py"
 TOTAL_DESIGN_NOTE_NAME = "2026-07-09 010147 CCFCRec Amazon-VG Task4-rollback M10-R recoverability and carrier audit 总设计"
@@ -53,6 +60,8 @@ class Outputs:
     validation_curve_csv: Path
     validation_summary_csv: Path
     pair_comparison_csv: Path
+    baseline_comparison_csv: Path
+    baseline_summary_json: Path
     route_decision_json: Path
     manifest_json: Path
     result_md: Path
@@ -268,6 +277,86 @@ def build_pair_comparison(summary: pd.DataFrame) -> pd.DataFrame:
     return comparison
 
 
+def _read_baseline_result(path: Path) -> pd.DataFrame:
+    if path.is_dir():
+        return pd.read_csv(path / "result.csv")
+    if path.name.endswith(".tar.gz"):
+        with tarfile.open(path, "r:gz") as tar:
+            matches = [member for member in tar.getmembers() if member.name.endswith("/result.csv")]
+            if len(matches) != 1:
+                raise ValueError(f"expected exactly one result.csv in baseline package, got {len(matches)}")
+            with tar.extractfile(matches[0]) as file_obj:
+                if file_obj is None:
+                    raise ValueError(f"cannot read baseline result member: {matches[0].name}")
+                return pd.read_csv(file_obj)
+    return pd.read_csv(path)
+
+
+def build_baseline_summary(baseline_result: Path | str) -> dict[str, Any]:
+    path = Path(baseline_result).expanduser()
+    result = _read_baseline_result(path)
+    best_ndcg = _best_row(result, "ndcg@20")
+    best_hr = _best_row(result, "hr@20")
+    last = result.sort_values(["epoch", "checkpoint_index"]).iloc[-1]
+    return {
+        "baseline_result": str(path),
+        "baseline_label": "baseline_seed43_workers8_fast_uniform",
+        "rows": int(len(result)),
+        "max_epoch": int(pd.to_numeric(result["epoch"], errors="coerce").max()),
+        "best_ndcg@20": _round_float(best_ndcg["ndcg@20"]),
+        "best_ndcg_epoch": int(best_ndcg["epoch"]),
+        "best_hr@20_at_best_ndcg": _round_float(best_ndcg["hr@20"]),
+        "best_hr@20": _round_float(best_hr["hr@20"]),
+        "best_hr_epoch": int(best_hr["epoch"]),
+        "ndcg@20_at_best_hr": _round_float(best_hr["ndcg@20"]),
+        "last_ndcg@20": _round_float(last["ndcg@20"]),
+        "last_hr@20": _round_float(last["hr@20"]),
+    }
+
+
+def _pct_delta(delta: float, baseline: float) -> float:
+    if not np.isfinite(delta) or not np.isfinite(baseline) or baseline == 0:
+        return float("nan")
+    return delta / baseline * 100.0
+
+
+def build_baseline_comparison(summary: pd.DataFrame, baseline: dict[str, Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    baseline_best_ndcg = float(baseline["best_ndcg@20"])
+    baseline_last_ndcg = float(baseline["last_ndcg@20"])
+    baseline_best_hr = float(baseline["best_hr@20"])
+    baseline_last_hr = float(baseline["last_hr@20"])
+    for _, row in summary.sort_values(["role", "run_label"]).iterrows():
+        best_ndcg_delta = float(row["best_ndcg@20"]) - baseline_best_ndcg
+        last_ndcg_delta = float(row["last_ndcg@20"]) - baseline_last_ndcg
+        best_hr_delta = float(row["best_hr@20"]) - baseline_best_hr
+        last_hr_delta = float(row["last_hr@20"]) - baseline_last_hr
+        rows.append(
+            {
+                "run_label": row["run_label"],
+                "role": row["role"],
+                "method_variant": row["method_variant"],
+                "baseline_best_ndcg@20": _round_float(baseline_best_ndcg),
+                "branch_best_ndcg@20": _round_float(row["best_ndcg@20"]),
+                "delta_best_ndcg@20_vs_baseline": _round_float(best_ndcg_delta),
+                "pct_best_ndcg@20_vs_baseline": _round_float(_pct_delta(best_ndcg_delta, baseline_best_ndcg)),
+                "baseline_last_ndcg@20": _round_float(baseline_last_ndcg),
+                "branch_last_ndcg@20": _round_float(row["last_ndcg@20"]),
+                "delta_last_ndcg@20_vs_baseline": _round_float(last_ndcg_delta),
+                "pct_last_ndcg@20_vs_baseline": _round_float(_pct_delta(last_ndcg_delta, baseline_last_ndcg)),
+                "baseline_best_hr@20": _round_float(baseline_best_hr),
+                "branch_best_hr@20": _round_float(row["best_hr@20"]),
+                "delta_best_hr@20_vs_baseline": _round_float(best_hr_delta),
+                "pct_best_hr@20_vs_baseline": _round_float(_pct_delta(best_hr_delta, baseline_best_hr)),
+                "baseline_last_hr@20": _round_float(baseline_last_hr),
+                "branch_last_hr@20": _round_float(row["last_hr@20"]),
+                "delta_last_hr@20_vs_baseline": _round_float(last_hr_delta),
+                "pct_last_hr@20_vs_baseline": _round_float(_pct_delta(last_hr_delta, baseline_last_hr)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _comparison_delta(comparison: pd.DataFrame, name: str) -> float:
     rows = comparison[comparison["comparison"].eq(name)]
     if rows.empty:
@@ -275,7 +364,11 @@ def _comparison_delta(comparison: pd.DataFrame, name: str) -> float:
     return float(rows.iloc[0]["delta_best_ndcg@20"])
 
 
-def decide_route(summary: pd.DataFrame, pair_comparison: pd.DataFrame) -> dict[str, Any]:
+def decide_route(
+    summary: pd.DataFrame,
+    pair_comparison: pd.DataFrame,
+    baseline_comparison: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     present_roles = set(summary.get("role", pd.Series(dtype=str)).astype(str))
     missing_roles = [role for role in REQUIRED_ROLES if role not in present_roles]
     if missing_roles:
@@ -301,6 +394,11 @@ def decide_route(summary: pd.DataFrame, pair_comparison: pd.DataFrame) -> dict[s
     not_early_transient = not bool(real.get("early_transient_peak_flag", False))
     completed = bool(real.get("completed_expected_epoch", True))
     real_abs_drop_vs_r4 = float(real["best_ndcg@20"]) - R4_REAL_BEST_NDCG_AT_20
+    real_baseline_row = None
+    if baseline_comparison is not None and not baseline_comparison.empty:
+        real_baseline_rows = baseline_comparison[baseline_comparison["role"].eq("real")]
+        if not real_baseline_rows.empty:
+            real_baseline_row = real_baseline_rows.iloc[0]
 
     if not completed:
         route = "r5_incomplete_or_failed"
@@ -364,6 +462,12 @@ def decide_route(summary: pd.DataFrame, pair_comparison: pd.DataFrame) -> dict[s
         "real_minus_rsp_control_best_ndcg@20": _round_float(real_minus_rsp),
         "real_minus_acat_control_best_ndcg@20": _round_float(real_minus_acat),
         "real_minus_r4_real_best_ndcg@20": _round_float(real_abs_drop_vs_r4),
+        "real_minus_baseline_best_ndcg@20": (
+            None if real_baseline_row is None else _round_float(real_baseline_row["delta_best_ndcg@20_vs_baseline"])
+        ),
+        "real_pct_best_ndcg@20_vs_baseline": (
+            None if real_baseline_row is None else _round_float(real_baseline_row["pct_best_ndcg@20_vs_baseline"])
+        ),
         "passes_m9_net_gate": passes_m9,
         "passes_target_net_gate": passes_target,
         "not_losing_rsp_control": not_losing_rsp,
@@ -395,6 +499,8 @@ def write_result_markdown(
     result_root: Path,
     validation_summary: pd.DataFrame,
     pair_comparison: pd.DataFrame,
+    baseline_summary: dict[str, Any],
+    baseline_comparison: pd.DataFrame,
     decision: dict[str, Any],
     manifest_name: str,
 ) -> None:
@@ -411,7 +517,7 @@ tags:
 
 # {run_stamp} CCFCRec Amazon-VG M10-R5 boundary competitor training 结果
 
-## Material Passport
+## Material Passport（材料护照）
 
 - artifact_type: experiment_training_result
 - project: CCFCRec Amazon-VG category availability
@@ -425,6 +531,7 @@ tags:
 > R5 offline audit（离线审计）路线判断：[[{R5_AUDIT_ROUTE_NOTE_NAME}]]
 > R4 training（训练）路线判断：[[{R4_TRAINING_ROUTE_NOTE_NAME}]]
 > 分析脚本：`{ANALYSIS_SCRIPT}`
+> baseline（基线）来源：`{baseline_summary["baseline_result"]}`
 > manifest（运行清单）：`{manifest_name}`
 
 ## 结论
@@ -436,21 +543,35 @@ open_multi_seed = {decision["open_multi_seed"]}
 open_alpha_sweep = {decision["open_alpha_sweep"]}
 ```
 
-解释：M10-R5 boundary competitor（边界竞争用户）相对 shuffle（打乱负控）有明显净收益，但 real（真实载体）输给 RSP control（RSP 对照），因此不能证明收益来自 Acat/recoverability（类别可用性/可恢复性）本身。
+解释：M10-R5 boundary competitor（边界竞争用户）相对 shuffle（打乱负控）有明显净收益，但所有分支相对 baseline（基线）都有显著下降；real（真实载体）还输给 RSP control（RSP 对照），因此不能证明收益来自 Acat/recoverability（类别可用性/可恢复性）本身。
 
-## Route Decision
+## Route Decision（路线决策）
 
 ```json
 {json.dumps(_jsonable(decision), ensure_ascii=False, indent=2)}
 ```
 
-## Validation Summary
+## Validation Summary（验证摘要）
 
 {md_table(validation_summary, ["run_label", "role", "method_variant", "best_ndcg@20", "best_ndcg_epoch", "last_ndcg@20", "best_ndcg_peak_minus_last", "best_hr@20", "best_hr_epoch", "completed_expected_epoch", "early_transient_peak_flag"], max_rows=20)}
 
-## Pair Comparison
+## Pair Comparison（成对对比）
 
 {md_table(pair_comparison, ["comparison", "delta_best_ndcg@20", "delta_best_ndcg_pct_vs_real", "delta_best_hr@20", "delta_last_ndcg@20", "left_best_epoch", "right_best_epoch", "passes_m9_net_gate", "passes_target_net_gate", "not_losing_to_control"], max_rows=20)}
+
+## Baseline Summary（基线摘要）
+
+```json
+{json.dumps(_jsonable(baseline_summary), ensure_ascii=False, indent=2)}
+```
+
+## Baseline Comparison（基线对比）
+
+> [!info] 字段说明
+> `delta_best_ndcg@20_vs_baseline`：当前分支 best NDCG@20（最佳前20归一化折损累计增益）减 baseline（基线）best NDCG@20。
+> `pct_best_ndcg@20_vs_baseline`：上述差值除以 baseline（基线）best NDCG@20 后的百分比变化。
+
+{md_table(baseline_comparison, ["run_label", "role", "branch_best_ndcg@20", "baseline_best_ndcg@20", "delta_best_ndcg@20_vs_baseline", "pct_best_ndcg@20_vs_baseline", "branch_last_ndcg@20", "baseline_last_ndcg@20", "delta_last_ndcg@20_vs_baseline", "pct_last_ndcg@20_vs_baseline", "branch_best_hr@20", "baseline_best_hr@20", "delta_best_hr@20_vs_baseline", "pct_best_hr@20_vs_baseline"], max_rows=20)}
 """
     path.write_text(content, encoding="utf-8")
 
@@ -462,6 +583,8 @@ def build_outputs(output_root: Path, run_stamp: str) -> Outputs:
         validation_curve_csv=output_dir / "m10_r5_validation_curve.csv",
         validation_summary_csv=output_dir / "m10_r5_validation_summary.csv",
         pair_comparison_csv=output_dir / "m10_r5_pair_comparison.csv",
+        baseline_comparison_csv=output_dir / "m10_r5_baseline_comparison.csv",
+        baseline_summary_json=output_dir / "m10_r5_baseline_summary.json",
         route_decision_json=output_dir / "m10_r5_route_decision.json",
         manifest_json=output_dir / "run_manifest.json",
         result_md=output_dir / f"{run_stamp} CCFCRec Amazon-VG M10-R5 boundary competitor training 结果.md",
@@ -479,13 +602,27 @@ def run(args: argparse.Namespace) -> Outputs:
     curve = build_validation_curve(result_root)
     summary = build_validation_summary(curve)
     comparison = build_pair_comparison(summary)
-    decision = decide_route(summary, comparison)
+    baseline_summary = build_baseline_summary(args.baseline_result)
+    baseline_comparison = build_baseline_comparison(summary, baseline_summary)
+    decision = decide_route(summary, comparison, baseline_comparison)
 
     curve.to_csv(outputs.validation_curve_csv, index=False)
     summary.to_csv(outputs.validation_summary_csv, index=False)
     comparison.to_csv(outputs.pair_comparison_csv, index=False)
+    baseline_comparison.to_csv(outputs.baseline_comparison_csv, index=False)
+    outputs.baseline_summary_json.write_text(json.dumps(_jsonable(baseline_summary), ensure_ascii=False, indent=2), encoding="utf-8")
     outputs.route_decision_json.write_text(json.dumps(_jsonable(decision), ensure_ascii=False, indent=2), encoding="utf-8")
-    write_result_markdown(outputs.result_md, run_stamp, result_root, summary, comparison, decision, outputs.manifest_json.name)
+    write_result_markdown(
+        outputs.result_md,
+        run_stamp,
+        result_root,
+        summary,
+        comparison,
+        baseline_summary,
+        baseline_comparison,
+        decision,
+        outputs.manifest_json.name,
+    )
 
     manifest = {
         "run_stamp": run_stamp,
@@ -494,6 +631,7 @@ def run(args: argparse.Namespace) -> Outputs:
         "experiment_stage": "M10-R5",
         "analysis_script": ANALYSIS_SCRIPT,
         "result_root": str(result_root),
+        "baseline_result": str(Path(args.baseline_result).expanduser()),
         "design_note": R5_DESIGN_NOTE_NAME,
         "audit_route_note": R5_AUDIT_ROUTE_NOTE_NAME,
         "training_route_note": R4_TRAINING_ROUTE_NOTE_NAME,
@@ -504,6 +642,7 @@ def run(args: argparse.Namespace) -> Outputs:
             "r4_real_best_ndcg@20": R4_REAL_BEST_NDCG_AT_20,
         },
         "outputs": {field: str(getattr(outputs, field)) for field in outputs.__dataclass_fields__},
+        "baseline_summary": baseline_summary,
         "decision": decision,
     }
     outputs.manifest_json.write_text(json.dumps(_jsonable(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -513,6 +652,7 @@ def run(args: argparse.Namespace) -> Outputs:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze M10-R5 boundary competitor training results.")
     parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--baseline-result", default=str(DEFAULT_BASELINE_RESULT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--run-stamp", default="")
     return parser
