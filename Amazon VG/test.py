@@ -8,6 +8,8 @@ import os
 from myargs import get_args
 from tqdm import tqdm
 from support import build_item_feature_tensors
+from m11_features import load_m11_feature_tensor
+from cicp_features import load_cicp_feature_tensor
 
 
 def resolve_device():
@@ -90,7 +92,22 @@ def ndcg_k(item, recommend_users, item_user_dict, k):
 
 
 class Validate:
-    def __init__(self, validate_csv, user_serialize_dict, img, genres, category_num, batch_size=512):
+    def __init__(
+        self,
+        validate_csv,
+        user_serialize_dict,
+        img,
+        genres,
+        category_num,
+        batch_size=512,
+        task4_profile_path="",
+        use_m11_features=False,
+        m11_feature_mode="target_masked",
+        reject_m11_evaluation_columns=False,
+        cicp_profile_path="",
+        use_cicp_features=False,
+        reject_cicp_evaluation_columns=True,
+    ):
         print("validate class init")
         validate_csv = pd.read_csv(validate_csv)
         self.items = list(dict.fromkeys(validate_csv['asin']))
@@ -112,6 +129,27 @@ class Validate:
             genres=self.genres_dict,
             category_num=self.category_num,
         )
+        self.m11_feature_tensor = None
+        if use_m11_features:
+            if not task4_profile_path:
+                raise ValueError("task4_profile_path is required when use_m11_features=True")
+            self.m11_feature_tensor = load_m11_feature_tensor(
+                task4_profile_path,
+                item_serialize_dict,
+                item_number=len(self.items),
+                feature_mode=m11_feature_mode,
+                reject_evaluation_columns=reject_m11_evaluation_columns,
+            )
+        self.cicp_feature_tensor = None
+        if use_cicp_features:
+            if not cicp_profile_path:
+                raise ValueError("cicp_profile_path is required when use_cicp_features=True")
+            self.cicp_feature_tensor = load_cicp_feature_tensor(
+                cicp_profile_path,
+                item_serialize_dict,
+                item_number=len(self.items),
+                reject_evaluation_columns=reject_cicp_evaluation_columns,
+            )
 
     def start_validate(self, model):
         # 开始评估
@@ -126,8 +164,30 @@ class Validate:
             batch_items = self.items[batch_start:batch_end]
             genres = item_category_tensor[batch_start:batch_end]
             image_feature = item_image_feature_tensor[batch_start:batch_end]
+            m11_features = (
+                self.m11_feature_tensor[batch_start:batch_end].to(device)
+                if self.m11_feature_tensor is not None
+                else None
+            )
+            cicp_features = (
+                self.cicp_feature_tensor[batch_start:batch_end].to(device)
+                if self.cicp_feature_tensor is not None
+                else None
+            )
             with torch.no_grad():
-                recommend_user_batches = get_similar_user_batch(model, genres, image_feature, max_k)
+                if m11_features is None and cicp_features is None:
+                    q_v_c = model(genres, image_feature, genres.shape[0])
+                else:
+                    q_v_c = model(
+                        genres,
+                        image_feature,
+                        genres.shape[0],
+                        m11_features=m11_features,
+                        cicp_features=cicp_features,
+                    )
+                ratings = torch.matmul(q_v_c, model.user_embedding.t())
+                top_k = min(max_k, ratings.shape[1])
+                recommend_user_batches = torch.topk(ratings, k=top_k, dim=1).indices.cpu().tolist()
             for it, recommend_users in zip(batch_items, recommend_user_batches):
                 # 计算hr指标
                 hr_hit_cnt_5 += hr_at_k(it, recommend_users, self.item_user_dict, 5)

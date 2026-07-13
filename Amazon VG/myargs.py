@@ -54,6 +54,31 @@ def get_args():
             'task4_boundary_competitor_pair_shuffle',
             'task4_boundary_competitor_pair_rsp_control',
             'task4_boundary_competitor_pair_acat_control',
+            'm11_target_competitor_pair',
+            'm11_target_competitor_pair_shuffle',
+            'm11_target_competitor_pair_lowrsp_control',
+            'm11_target_competitor_pair_rsp_control',
+            'm11r1_full_target_competitor_pair',
+            'm11r1_popmatch_competitor_pair_control',
+            'm11r1_lowacat_competitor_pair_control',
+            'm11r2_qbpr_score_weight',
+            'm11r2_qbpr_focal',
+            'm11r2_qbpr_curriculum',
+            'm11r2_target_feature_fusion',
+            'm11r3_dual_residual',
+            'm11r3_norm_capped_residual',
+            'm11r3_neighbor_transfer',
+            'm11r3_target_film',
+            'm11r4_protected_experts',
+            'm11r4_continuous_fusion',
+            'm11r4_relational_alignment',
+            'm11r4_continuous_focal',
+            'cicpr1_e4_residual',
+            'cicpr1_modality_routing',
+            'cicpr1_category_expert',
+            'cicpr1_alignment_curriculum',
+            'cicpr1_counterfactual_margin',
+            'cicpr1_adaptive_attention',
         ],
         help='training method variant',
     )
@@ -78,6 +103,31 @@ def get_args():
     parser.add_argument('--task4_competitor_margin', type=float, default=0.1, help='Task4 R4 target-vs-competitor softplus margin')
     parser.add_argument('--task4_competitor_k', type=int, default=20, help='Task4 R4 competitor candidate count; first implementation uses batch neg_user')
     parser.add_argument('--task4_boundary_competitor_cache_path', type=str, default='', help='Task4 R5 train-safe boundary competitor cache CSV')
+    parser.add_argument('--m11r2_focal_gamma', type=float, default=2.0, help='M11-R2 focal qBPR difficulty exponent')
+    parser.add_argument('--m11r2_focal_temperature', type=float, default=1.0, help='M11-R2 focal qBPR score-difference temperature')
+    parser.add_argument('--m11r2_curriculum_warmup_epochs', type=int, default=20, help='M11-R2 qBPR target-weight warmup epochs')
+    parser.add_argument('--m11r2_feature_dim', type=int, default=16, help='M11-R2 projected train-safe target-feature dimension')
+    parser.add_argument('--m11r3_residual_max_ratio', type=float, default=0.15, help='maximum M11 residual norm as a ratio of the base hidden norm')
+    parser.add_argument('--m11r3_neighbor_loss_weight', type=float, default=0.1, help='weight for one-way target-to-neighbor residual transfer')
+    parser.add_argument('--m11r3_neighbor_temperature', type=float, default=0.25, help='distance temperature for train-batch M11 structural neighbors')
+    parser.add_argument('--m11r3_film_strength', type=float, default=0.1, help='maximum target-conditioned FiLM modulation strength')
+    parser.add_argument('--m11r4_expert_film_strength', type=float, default=0.2, help='non-target FiLM strength for M11-R4 protected experts')
+    parser.add_argument('--m11r4_fusion_strength', type=float, default=0.25, help='continuous category/image modulation strength for M11-R4 fusion')
+    parser.add_argument('--m11r4_relation_loss_weight', type=float, default=0.05, help='target-to-all relational alignment loss weight')
+    parser.add_argument('--m11r4_focal_alpha', type=float, default=1.5, help='continuous full-coverage focal objective weight scale')
+    parser.add_argument('--m11r4_focal_gamma', type=float, default=2.0, help='continuous full-coverage focal difficulty exponent')
+    parser.add_argument('--m11r4_focal_temperature', type=float, default=0.5, help='continuous full-coverage focal difficulty temperature')
+    parser.add_argument('--m11r4_focal_floor', type=float, default=0.35, help='minimum full-coverage M11 signal strength')
+    parser.add_argument('--cicp_profile_path', type=str, default='', help='frozen train/validation CICP profile CSV')
+    parser.add_argument('--cicp_feature_dim', type=int, default=16, help='CICP projected feature dimension for the E4-style residual only')
+    parser.add_argument('--cicp_residual_max_ratio', type=float, default=0.15, help='maximum CICP E4-style residual norm relative to base hidden norm')
+    parser.add_argument('--cicp_modality_strength', type=float, default=0.25, help='maximum category/image routing scale')
+    parser.add_argument('--cicp_expert_strength', type=float, default=0.20, help='maximum category-expert mixture share')
+    parser.add_argument('--cicp_alignment_weight', type=float, default=0.05, help='CICP collaborative alignment loss weight')
+    parser.add_argument('--cicp_alignment_warmup_epochs', type=int, default=20, help='CICP alignment curriculum warmup epochs')
+    parser.add_argument('--cicp_counterfactual_weight', type=float, default=0.05, help='CICP category counterfactual objective weight')
+    parser.add_argument('--cicp_counterfactual_margin', type=float, default=0.05, help='CICP real-vs-shuffled category margin target')
+    parser.add_argument('--cicp_attention_strength', type=float, default=0.50, help='CICP category attention log-temperature strength')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

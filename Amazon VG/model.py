@@ -19,6 +19,13 @@ import numpy as np
 from support import serialize_user
 from test import Validate
 from myargs import get_args, args_tostring
+from m11_features import (
+    M11_FEATURE_MODE_FULL_STRUCTURAL,
+    M11_FEATURE_MODE_TARGET_MASKED,
+    M11_FEATURE_WIDTH,
+    load_m11_feature_tensor,
+)
+from cicp_features import CICP_FEATURE_WIDTH, load_cicp_feature_tensor
 
 
 def resolve_device():
@@ -50,7 +57,61 @@ TASK4_WEIGHT_METHOD_VARIANTS = {
     "task4_acat_trainhard_weight",
     "task4_highdetail_trainhard_weight",
     "task4_highdetail_trainhard_shuffle_weight",
+    "m11r2_qbpr_score_weight",
+    "m11r2_qbpr_curriculum",
 }
+
+M11R2_QBPR_WEIGHT_METHOD_VARIANTS = {
+    "m11r2_qbpr_score_weight",
+    "m11r2_qbpr_curriculum",
+}
+
+M11R2_FOCAL_METHOD_VARIANTS = {"m11r2_qbpr_focal"}
+M11R3_DUAL_RESIDUAL_METHOD_VARIANTS = {"m11r3_dual_residual"}
+M11R3_NORM_CAPPED_METHOD_VARIANTS = {"m11r3_norm_capped_residual"}
+M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS = {"m11r3_neighbor_transfer"}
+M11R3_FILM_METHOD_VARIANTS = {"m11r3_target_film"}
+M11R4_PROTECTED_EXPERT_METHOD_VARIANTS = {"m11r4_protected_experts"}
+M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS = {"m11r4_continuous_fusion"}
+M11R4_RELATIONAL_ALIGNMENT_METHOD_VARIANTS = {"m11r4_relational_alignment"}
+M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS = {"m11r4_continuous_focal"}
+CICPR1_E4_RESIDUAL_METHOD_VARIANTS = {"cicpr1_e4_residual"}
+CICPR1_MODALITY_ROUTING_METHOD_VARIANTS = {"cicpr1_modality_routing"}
+CICPR1_CATEGORY_EXPERT_METHOD_VARIANTS = {"cicpr1_category_expert"}
+CICPR1_ALIGNMENT_METHOD_VARIANTS = {"cicpr1_alignment_curriculum"}
+CICPR1_COUNTERFACTUAL_METHOD_VARIANTS = {"cicpr1_counterfactual_margin"}
+CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS = {"cicpr1_adaptive_attention"}
+CICPR1_METHOD_VARIANTS = (
+    CICPR1_E4_RESIDUAL_METHOD_VARIANTS
+    | CICPR1_MODALITY_ROUTING_METHOD_VARIANTS
+    | CICPR1_CATEGORY_EXPERT_METHOD_VARIANTS
+    | CICPR1_ALIGNMENT_METHOD_VARIANTS
+    | CICPR1_COUNTERFACTUAL_METHOD_VARIANTS
+    | CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS
+)
+M11R4_FEATURE_METHOD_VARIANTS = (
+    M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
+    | M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
+    | M11R4_RELATIONAL_ALIGNMENT_METHOD_VARIANTS
+    | M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS
+)
+M11R3_FEATURE_METHOD_VARIANTS = (
+    M11R3_DUAL_RESIDUAL_METHOD_VARIANTS
+    | M11R3_NORM_CAPPED_METHOD_VARIANTS
+    | M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS
+    | M11R3_FILM_METHOD_VARIANTS
+)
+M11R2_FEATURE_METHOD_VARIANTS = (
+    {"m11r2_target_feature_fusion"}
+    | M11R3_FEATURE_METHOD_VARIANTS
+    | M11R4_FEATURE_METHOD_VARIANTS
+)
+M11R3_UNMASKED_FEATURE_METHOD_VARIANTS = (
+    M11R3_DUAL_RESIDUAL_METHOD_VARIANTS
+    | M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS
+    | M11R3_FILM_METHOD_VARIANTS
+    | M11R4_FEATURE_METHOD_VARIANTS
+)
 
 TASK4_PAIR_MARGIN_METHOD_VARIANTS = {
     "task4_acat_pairmargin_weight",
@@ -69,6 +130,13 @@ TASK4_COMPETITOR_PAIR_METHOD_VARIANTS = {
     "task4_boundary_competitor_pair_shuffle",
     "task4_boundary_competitor_pair_rsp_control",
     "task4_boundary_competitor_pair_acat_control",
+    "m11_target_competitor_pair",
+    "m11_target_competitor_pair_shuffle",
+    "m11_target_competitor_pair_lowrsp_control",
+    "m11_target_competitor_pair_rsp_control",
+    "m11r1_full_target_competitor_pair",
+    "m11r1_popmatch_competitor_pair_control",
+    "m11r1_lowacat_competitor_pair_control",
 }
 
 TASK4_BOUNDARY_COMPETITOR_PAIR_METHOD_VARIANTS = {
@@ -82,6 +150,8 @@ TASK4_METHOD_VARIANTS = (
     TASK4_WEIGHT_METHOD_VARIANTS
     | TASK4_PAIR_MARGIN_METHOD_VARIANTS
     | TASK4_COMPETITOR_PAIR_METHOD_VARIANTS
+    | M11R2_FOCAL_METHOD_VARIANTS
+    | M11R2_FEATURE_METHOD_VARIANTS
 )
 
 TASK4_FORBIDDEN_TRAIN_COLUMNS = {
@@ -161,6 +231,25 @@ def uses_task4_boundary_competitor_pair(args):
     return getattr(args, "method_variant", "baseline") in TASK4_BOUNDARY_COMPETITOR_PAIR_METHOD_VARIANTS
 
 
+def uses_m11r2_focal_qbpr(args):
+    return getattr(args, "method_variant", "baseline") in M11R2_FOCAL_METHOD_VARIANTS
+
+
+def uses_m11r2_feature_fusion(args):
+    return getattr(args, "method_variant", "baseline") in M11R2_FEATURE_METHOD_VARIANTS
+
+
+def uses_cicp_features(args):
+    return getattr(args, "method_variant", "baseline") in CICPR1_METHOD_VARIANTS
+
+
+def resolve_m11_feature_mode(args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant in M11R3_UNMASKED_FEATURE_METHOD_VARIANTS:
+        return M11_FEATURE_MODE_FULL_STRUCTURAL
+    return M11_FEATURE_MODE_TARGET_MASKED
+
+
 def _bool_series(series):
     if series.dtype == bool:
         return series.fillna(False).astype(bool)
@@ -211,8 +300,35 @@ def _task4_shuffle_by_split_and_detail(profile, flags, args, scores=None):
     return shuffled_flags, shuffled_scores
 
 
+M11R2_QBPR_PROFILE_COLUMNS = {
+    "m11r2_qbpr_score_weight": (
+        "m11r1_full_target_flag",
+        "m11r1_full_target_loss_score",
+    ),
+    "m11r2_qbpr_curriculum": (
+        "m11r1_full_target_flag",
+        "m11r1_full_target_loss_score",
+    ),
+}
+
+
+def _m11r2_qbpr_flags_and_scores(profile, method_variant):
+    if method_variant not in M11R2_QBPR_PROFILE_COLUMNS:
+        raise ValueError(f"unsupported M11-R2 qBPR method_variant={method_variant}")
+    flag_column, score_column = M11R2_QBPR_PROFILE_COLUMNS[method_variant]
+    missing = [column for column in [flag_column, score_column] if column not in profile.columns]
+    if missing:
+        raise ValueError(f"M11-R2 profile 缺少 {missing}")
+    flags = _bool_series(profile[flag_column])
+    scores = _clip01(_numeric_task4_series(profile, score_column))
+    return flags, scores
+
+
 def _task4_variant_flags(profile, args):
     method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant in M11R2_QBPR_WEIGHT_METHOD_VARIANTS:
+        flags, _ = _m11r2_qbpr_flags_and_scores(profile, method_variant)
+        return flags
     if method_variant == "task4_rsp_high_weight":
         if "RSP_group" not in profile.columns:
             raise ValueError("Task4 profile 缺少 RSP_group")
@@ -315,14 +431,209 @@ def build_task4_item_weights_from_profile(profile, item_serialize_dict, args, it
         raise ValueError("task4_loss_alpha must be positive for Task4 variants")
 
     work = profile.copy().sort_values("raw_asin").reset_index(drop=True)
-    flags = _task4_variant_flags(work, args).astype(bool)
+    method_variant = getattr(args, "method_variant", "baseline")
+    if method_variant in M11R2_QBPR_WEIGHT_METHOD_VARIANTS:
+        flags, scores = _m11r2_qbpr_flags_and_scores(work, method_variant)
+    else:
+        flags = _task4_variant_flags(work, args).astype(bool)
+        scores = pd.Series(1.0, index=work.index, dtype=float)
     weights = torch.ones(int(item_number), dtype=torch.float32)
-    for raw_asin, flag in zip(work["raw_asin"], flags):
+    for raw_asin, flag, score in zip(work["raw_asin"], flags.astype(bool), scores):
         serial_item = item_serialize_dict.get(raw_asin)
         if serial_item is None:
             continue
-        weights[int(serial_item)] = 1.0 + alpha * float(flag)
+        if bool(flag):
+            weights[int(serial_item)] = 1.0 + alpha * float(score)
     return weights / weights.mean().detach()
+
+
+def build_m11r2_target_score_tensor_from_profile(profile, item_serialize_dict, item_number=None):
+    if "raw_asin" not in profile.columns:
+        raise ValueError("M11-R2 profile 缺少 raw_asin")
+    required = ["m11r1_full_target_flag", "m11r1_full_target_loss_score"]
+    missing = [column for column in required if column not in profile.columns]
+    if missing:
+        raise ValueError(f"M11-R2 profile 缺少 {missing}")
+    if not item_serialize_dict:
+        raise ValueError("item_serialize_dict must not be empty")
+    if item_number is None:
+        item_number = max(item_serialize_dict.values()) + 1
+
+    work = profile.copy().sort_values("raw_asin").reset_index(drop=True)
+    flags = _bool_series(work["m11r1_full_target_flag"])
+    scores = _clip01(_numeric_task4_series(work, "m11r1_full_target_loss_score"))
+    target_scores = torch.zeros(int(item_number), dtype=torch.float32)
+    for raw_asin, flag, score in zip(work["raw_asin"], flags, scores):
+        serial_item = item_serialize_dict.get(raw_asin)
+        if serial_item is None or not bool(flag):
+            continue
+        target_scores[int(serial_item)] = float(score)
+    return target_scores
+
+
+def build_m11r2_focal_qbpr_weights(score_diff, target_scores, args):
+    if target_scores is None:
+        return None
+    gamma = float(getattr(args, "m11r2_focal_gamma", 2.0))
+    temperature = float(getattr(args, "m11r2_focal_temperature", 1.0))
+    alpha = float(getattr(args, "task4_loss_alpha", 0.75))
+    difficulty = torch.sigmoid(-score_diff / temperature).pow(gamma).detach()
+    weights = 1.0 + alpha * target_scores.to(score_diff.dtype) * difficulty
+    return weights / weights.mean().detach().clamp_min(1e-12)
+
+
+def build_m11r2_curriculum_weights(full_weights, epoch_index, warmup_epochs):
+    if full_weights is None:
+        return None
+    warmup_epochs = max(int(warmup_epochs), 1)
+    progress = min(1.0, float(epoch_index + 1) / float(warmup_epochs))
+    return 1.0 + progress * (full_weights - 1.0)
+
+
+def cap_m11_residual_norm(residual, hidden, max_ratio):
+    max_ratio = float(max_ratio)
+    if max_ratio <= 0:
+        raise ValueError("m11r3_residual_max_ratio must be positive")
+    residual_norm = residual.norm(dim=1, keepdim=True)
+    hidden_norm = hidden.detach().norm(dim=1, keepdim=True)
+    allowed_norm = max_ratio * hidden_norm
+    scale = torch.clamp(allowed_norm / residual_norm.clamp_min(1e-12), max=1.0)
+    return residual * scale
+
+
+def build_m11r3_neighbor_transfer_loss(residual, features, temperature=0.25):
+    if residual is None or features is None:
+        reference = residual if residual is not None else features
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if features.ndim != 2 or features.shape[1] != M11_FEATURE_WIDTH:
+        raise ValueError(f"M11 neighbor features must have shape [batch,{M11_FEATURE_WIDTH}]")
+    temperature = float(temperature)
+    if temperature <= 0:
+        raise ValueError("m11r3_neighbor_temperature must be positive")
+
+    target_mask = features[:, 0] >= 0.5
+    non_target_mask = ~target_mask
+    if not bool(target_mask.any()) or not bool(non_target_mask.any()):
+        return residual.new_tensor(0.0)
+
+    target_structure = features[target_mask, 1:].float()
+    non_target_structure = features[non_target_mask, 1:].float()
+    distances = torch.cdist(target_structure, non_target_structure, p=2)
+    nearest_distance, nearest_index = distances.min(dim=1)
+    target_residual = residual[target_mask].detach()
+    neighbor_residual = residual[non_target_mask][nearest_index]
+    confidence = torch.exp(-nearest_distance / temperature).detach()
+    per_pair = F.smooth_l1_loss(neighbor_residual, target_residual, reduction="none").mean(dim=1)
+    return (confidence * per_pair).sum()
+
+
+def build_m11r4_relational_alignment_loss(q_v_c, features):
+    if q_v_c is None or features is None:
+        reference = q_v_c if q_v_c is not None else features
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if features.ndim != 2 or features.shape[1] != M11_FEATURE_WIDTH:
+        raise ValueError(f"M11 relation features must have shape [batch,{M11_FEATURE_WIDTH}]")
+    if q_v_c.ndim != 2 or q_v_c.shape[0] != features.shape[0]:
+        raise ValueError("M11 relation q_v_c and features must share the batch dimension")
+
+    target_mask = features[:, 0] >= 0.5
+    if not bool(target_mask.any()) or q_v_c.shape[0] < 2:
+        return q_v_c.new_tensor(0.0)
+
+    structure = features[:, 1:].to(dtype=q_v_c.dtype)
+    structure = structure - structure.mean(dim=0, keepdim=True)
+    structure = F.normalize(structure, dim=1, eps=1e-6)
+    representation = F.normalize(q_v_c, dim=1, eps=1e-6)
+    structure_similarity = torch.matmul(structure[target_mask], structure.t()).detach()
+    representation_similarity = torch.matmul(representation[target_mask], representation.t())
+
+    coverage = 0.5 + 0.5 * features[:, 1].to(dtype=q_v_c.dtype).detach().clamp(0.0, 1.0)
+    pair_weight = coverage.unsqueeze(0).expand_as(representation_similarity)
+    per_pair = F.smooth_l1_loss(
+        representation_similarity,
+        structure_similarity,
+        reduction="none",
+    )
+    normalized = (per_pair * pair_weight).sum() / pair_weight.sum().clamp_min(1e-12)
+    return normalized * q_v_c.shape[0]
+
+
+def build_m11r4_continuous_focal_weights(difficulty, features, args):
+    if difficulty is None or features is None:
+        return None
+    if difficulty.ndim != 1:
+        raise ValueError("M11-R4 focal difficulty must be one-dimensional")
+    if features.ndim != 2 or features.shape != (difficulty.shape[0], M11_FEATURE_WIDTH):
+        raise ValueError(f"M11-R4 focal features must have shape [batch,{M11_FEATURE_WIDTH}]")
+
+    alpha = float(getattr(args, "m11r4_focal_alpha", 1.5))
+    gamma = float(getattr(args, "m11r4_focal_gamma", 2.0))
+    floor = float(getattr(args, "m11r4_focal_floor", 0.35))
+    signal = features[:, 1].to(dtype=difficulty.dtype).detach().clamp(0.0, 1.0)
+    coverage = floor + (1.0 - floor) * signal
+    weights = 1.0 + alpha * coverage * difficulty.detach().clamp(0.0, 1.0).pow(gamma)
+    return weights / weights.mean().detach().clamp_min(1e-12)
+
+
+def cap_cicp_residual_norm(residual, hidden, max_ratio):
+    max_ratio = float(max_ratio)
+    if max_ratio <= 0 or max_ratio > 1:
+        raise ValueError("cicp_residual_max_ratio must be in (0, 1]")
+    residual_norm = residual.norm(dim=1, keepdim=True)
+    allowed_norm = max_ratio * hidden.detach().norm(dim=1, keepdim=True)
+    scale = torch.clamp(allowed_norm / residual_norm.clamp_min(1e-12), max=1.0)
+    return residual * scale
+
+
+def build_cicpr1_alignment_loss(q_v_c, item_embedding, cicp_features, epoch_index, args):
+    if q_v_c is None or item_embedding is None or cicp_features is None:
+        reference = q_v_c if q_v_c is not None else item_embedding
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if q_v_c.shape != item_embedding.shape:
+        raise ValueError("CICP alignment q_v_c and item_embedding must have the same shape")
+    if cicp_features.ndim != 2 or cicp_features.shape != (q_v_c.shape[0], CICP_FEATURE_WIDTH):
+        raise ValueError(
+            f"CICP alignment features must have shape [batch,{CICP_FEATURE_WIDTH}]"
+        )
+    warmup_epochs = int(getattr(args, "cicp_alignment_warmup_epochs", 20))
+    if warmup_epochs <= 0:
+        raise ValueError("cicp_alignment_warmup_epochs must be positive")
+    progress = min(1.0, float(epoch_index + 1) / float(warmup_epochs))
+    score = cicp_features[:, 0].detach().to(dtype=q_v_c.dtype).clamp(0.0, 1.0)
+    item_teacher = item_embedding.detach()
+    per_item = 1.0 - F.cosine_similarity(q_v_c, item_teacher, dim=1, eps=1e-6)
+    weights = 0.25 + 0.75 * score
+    return progress * (per_item * weights).sum()
+
+
+def build_cicpr1_counterfactual_margin_loss(real_margin, shuffled_margin, cicp_features, args):
+    if real_margin is None or shuffled_margin is None or cicp_features is None:
+        reference = real_margin if real_margin is not None else shuffled_margin
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if real_margin.ndim != 1 or real_margin.shape != shuffled_margin.shape:
+        raise ValueError("CICP counterfactual margins must be same-shape vectors")
+    if cicp_features.ndim != 2 or cicp_features.shape != (
+        real_margin.shape[0],
+        CICP_FEATURE_WIDTH,
+    ):
+        raise ValueError(
+            f"CICP counterfactual features must have shape [batch,{CICP_FEATURE_WIDTH}]"
+        )
+    margin = float(getattr(args, "cicp_counterfactual_margin", 0.05))
+    if margin <= 0:
+        raise ValueError("cicp_counterfactual_margin must be positive")
+    score = cicp_features[:, 0].detach().to(dtype=real_margin.dtype).clamp(0.0, 1.0)
+    target_gap = margin * score
+    observed_gap = real_margin - shuffled_margin
+    return (score * F.softplus(target_gap - observed_gap)).sum()
 
 
 def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=None):
@@ -358,6 +669,54 @@ def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, a
     return {"loss_weight": loss_weight, "margin": margin}
 
 
+def _m11_target_scores(profile):
+    if "m11_target_score" in profile.columns:
+        return _clip01(_numeric_task4_series(profile, "m11_target_score"))
+    acat_score = _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+    hard_score = _clip01(_numeric_task4_series(profile, "train_safe_hard_proxy_score"))
+    if "RSP_score" in profile.columns:
+        rsp_inverse = (1.0 - _clip01(_numeric_task4_series(profile, "RSP_score"))).clip(lower=0.0, upper=1.0)
+    else:
+        rsp_inverse = pd.Series(0.5, index=profile.index)
+    return _clip01((0.45 * acat_score) + (0.35 * hard_score) + (0.20 * rsp_inverse))
+
+
+def _m11_neighbor_support_flags(profile):
+    missing = [
+        column
+        for column in ["category_neighbor_mismatch_proxy_high_flag", "support_tail_proxy_high_flag"]
+        if column not in profile.columns
+    ]
+    if missing:
+        raise ValueError(f"M11 profile 缺少 {missing}")
+    return (
+        _bool_series(profile["category_neighbor_mismatch_proxy_high_flag"])
+        & _bool_series(profile["support_tail_proxy_high_flag"])
+    )
+
+
+def _m11_low_rsp_flags(profile):
+    if "RSP_group" not in profile.columns:
+        raise ValueError("M11 profile 缺少 RSP_group")
+    return ~profile["RSP_group"].astype(str).eq("RSP_high")
+
+
+def _m11_target_flags(profile):
+    if "m11_high_acat_low_rsp_neighbor_support_flag" in profile.columns:
+        return _bool_series(profile["m11_high_acat_low_rsp_neighbor_support_flag"])
+    return _task4_high_acat_flags(profile) & _m11_low_rsp_flags(profile) & _m11_neighbor_support_flags(profile)
+
+
+def _m11_lowrsp_matched_control_flags(profile):
+    return (~_task4_high_acat_flags(profile)) & _m11_low_rsp_flags(profile) & _m11_neighbor_support_flags(profile)
+
+
+def _m11_rsp_control_flags(profile):
+    if "RSP_group" not in profile.columns:
+        raise ValueError("M11 profile 缺少 RSP_group")
+    return profile["RSP_group"].astype(str).eq("RSP_high") & _m11_neighbor_support_flags(profile)
+
+
 def _task4_competitor_pair_flags_and_scores(profile, args):
     method_variant = getattr(args, "method_variant", "baseline")
     if method_variant in {"task4_competitor_pair", "task4_boundary_competitor_pair"}:
@@ -384,6 +743,37 @@ def _task4_competitor_pair_flags_and_scores(profile, args):
     if method_variant in {"task4_competitor_pair_acat_control", "task4_boundary_competitor_pair_acat_control"}:
         flags = _task4_high_detail_flags(profile) & _task4_high_acat_flags(profile)
         return flags, _clip01(_numeric_task4_series(profile, "s_cat_v3"))
+    if method_variant == "m11_target_competitor_pair":
+        return _m11_target_flags(profile), _m11_target_scores(profile)
+    if method_variant == "m11_target_competitor_pair_shuffle":
+        flags = _m11_target_flags(profile)
+        scores = _m11_target_scores(profile)
+        shuffled_flags, shuffled_scores = _task4_shuffle_by_split_and_detail(profile, flags, args, scores=scores)
+        return shuffled_flags.astype(bool), _clip01(shuffled_scores)
+    if method_variant == "m11_target_competitor_pair_lowrsp_control":
+        return _m11_lowrsp_matched_control_flags(profile), _m11_target_scores(profile)
+    if method_variant == "m11_target_competitor_pair_rsp_control":
+        return _m11_rsp_control_flags(profile), _m11_target_scores(profile)
+    m11r1_columns = {
+        "m11r1_full_target_competitor_pair": (
+            "m11r1_full_target_flag",
+            "m11r1_full_target_loss_score",
+        ),
+        "m11r1_popmatch_competitor_pair_control": (
+            "m11r1_popmatch_control_flag",
+            "m11r1_popmatch_control_loss_score",
+        ),
+        "m11r1_lowacat_competitor_pair_control": (
+            "m11r1_lowacat_control_flag",
+            "m11r1_lowacat_control_loss_score",
+        ),
+    }
+    if method_variant in m11r1_columns:
+        flag_column, score_column = m11r1_columns[method_variant]
+        missing = [column for column in [flag_column, score_column] if column not in profile.columns]
+        if missing:
+            raise ValueError(f"M11-R1 profile 缺少 {missing}")
+        return _bool_series(profile[flag_column]), _clip01(_numeric_task4_series(profile, score_column))
     raise ValueError(f"unsupported Task4 competitor-pair method_variant={method_variant}")
 
 
@@ -428,6 +818,51 @@ def load_task4_item_weights(item_serialize_dict, args, item_number=None):
         raise ValueError("task4_profile_path is required for Task4 variants")
     profile = pd.read_csv(profile_path)
     return build_task4_item_weights_from_profile(profile, item_serialize_dict, args, item_number=item_number)
+
+
+def load_m11r2_target_score_tensor(item_serialize_dict, args, item_number=None):
+    if not uses_m11r2_focal_qbpr(args):
+        return None
+    profile_path = getattr(args, "task4_profile_path", "")
+    if not profile_path:
+        raise ValueError("task4_profile_path is required for M11-R2 focal qBPR")
+    profile = pd.read_csv(profile_path, dtype={"raw_asin": str}, low_memory=False)
+    return build_m11r2_target_score_tensor_from_profile(
+        profile,
+        item_serialize_dict,
+        item_number=item_number,
+    )
+
+
+def load_m11r2_feature_tensor(item_serialize_dict, args, item_number=None):
+    if not uses_m11r2_feature_fusion(args):
+        return None
+    profile_path = getattr(args, "task4_profile_path", "")
+    if not profile_path:
+        raise ValueError("task4_profile_path is required for M11-R2 feature fusion")
+    return load_m11_feature_tensor(
+        profile_path,
+        item_serialize_dict,
+        item_number=item_number,
+        feature_mode=resolve_m11_feature_mode(args),
+        reject_evaluation_columns=(
+            getattr(args, "method_variant", "baseline") in M11R4_FEATURE_METHOD_VARIANTS
+        ),
+    )
+
+
+def load_cicpr1_feature_tensor(item_serialize_dict, args, item_number=None):
+    if not uses_cicp_features(args):
+        return None
+    profile_path = getattr(args, "cicp_profile_path", "")
+    if not profile_path:
+        raise ValueError("cicp_profile_path is required for CICP-R1 variants")
+    return load_cicp_feature_tensor(
+        profile_path,
+        item_serialize_dict,
+        item_number=item_number,
+        reject_evaluation_columns=True,
+    )
 
 
 def load_task4_pair_margin_targets(item_serialize_dict, args, item_number=None):
@@ -574,6 +1009,82 @@ def validate_method_args(args):
     if method_variant in TASK4_BOUNDARY_COMPETITOR_PAIR_METHOD_VARIANTS:
         if not str(getattr(args, "task4_boundary_competitor_cache_path", "")).strip():
             raise ValueError("task4_boundary_competitor_cache_path is required for Task4 boundary competitor variants")
+    if method_variant in M11R2_FOCAL_METHOD_VARIANTS:
+        if float(getattr(args, "m11r2_focal_gamma", 2.0)) <= 0:
+            raise ValueError("m11r2_focal_gamma must be positive")
+        if float(getattr(args, "m11r2_focal_temperature", 1.0)) <= 0:
+            raise ValueError("m11r2_focal_temperature must be positive")
+    if method_variant == "m11r2_qbpr_curriculum":
+        if int(getattr(args, "m11r2_curriculum_warmup_epochs", 20)) <= 0:
+            raise ValueError("m11r2_curriculum_warmup_epochs must be positive")
+    if method_variant in M11R2_FEATURE_METHOD_VARIANTS:
+        if int(getattr(args, "m11r2_feature_dim", 16)) <= 0:
+            raise ValueError("m11r2_feature_dim must be positive")
+    if method_variant in M11R3_NORM_CAPPED_METHOD_VARIANTS:
+        max_ratio = float(getattr(args, "m11r3_residual_max_ratio", 0.15))
+        if max_ratio <= 0 or max_ratio > 1:
+            raise ValueError("m11r3_residual_max_ratio must be in (0, 1]")
+    if method_variant in M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS:
+        if float(getattr(args, "m11r3_neighbor_loss_weight", 0.1)) <= 0:
+            raise ValueError("m11r3_neighbor_loss_weight must be positive")
+        if float(getattr(args, "m11r3_neighbor_temperature", 0.25)) <= 0:
+            raise ValueError("m11r3_neighbor_temperature must be positive")
+    if method_variant in M11R3_FILM_METHOD_VARIANTS:
+        film_strength = float(getattr(args, "m11r3_film_strength", 0.1))
+        if film_strength <= 0 or film_strength > 1:
+            raise ValueError("m11r3_film_strength must be in (0, 1]")
+    if method_variant in M11R4_PROTECTED_EXPERT_METHOD_VARIANTS:
+        strength = float(getattr(args, "m11r4_expert_film_strength", 0.2))
+        if strength <= 0 or strength > 1:
+            raise ValueError("m11r4_expert_film_strength must be in (0, 1]")
+    if method_variant in M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS:
+        strength = float(getattr(args, "m11r4_fusion_strength", 0.25))
+        if strength <= 0 or strength > 1:
+            raise ValueError("m11r4_fusion_strength must be in (0, 1]")
+    if method_variant in M11R4_RELATIONAL_ALIGNMENT_METHOD_VARIANTS:
+        if float(getattr(args, "m11r4_relation_loss_weight", 0.05)) <= 0:
+            raise ValueError("m11r4_relation_loss_weight must be positive")
+    if method_variant in M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS:
+        if float(getattr(args, "m11r4_focal_alpha", 1.5)) <= 0:
+            raise ValueError("m11r4_focal_alpha must be positive")
+        if float(getattr(args, "m11r4_focal_gamma", 2.0)) <= 0:
+            raise ValueError("m11r4_focal_gamma must be positive")
+        if float(getattr(args, "m11r4_focal_temperature", 0.5)) <= 0:
+            raise ValueError("m11r4_focal_temperature must be positive")
+        floor = float(getattr(args, "m11r4_focal_floor", 0.35))
+        if floor <= 0 or floor > 1:
+            raise ValueError("m11r4_focal_floor must be in (0, 1]")
+    if method_variant in CICPR1_METHOD_VARIANTS:
+        if not str(getattr(args, "cicp_profile_path", "")).strip():
+            raise ValueError("cicp_profile_path is required for CICP-R1 variants")
+    if method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS:
+        if int(getattr(args, "cicp_feature_dim", 16)) <= 0:
+            raise ValueError("cicp_feature_dim must be positive")
+        ratio = float(getattr(args, "cicp_residual_max_ratio", 0.15))
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("cicp_residual_max_ratio must be in (0, 1]")
+    if method_variant in CICPR1_MODALITY_ROUTING_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicp_modality_strength", 0.25))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicp_modality_strength must be in (0, 1]")
+    if method_variant in CICPR1_CATEGORY_EXPERT_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicp_expert_strength", 0.20))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicp_expert_strength must be in (0, 1]")
+    if method_variant in CICPR1_ALIGNMENT_METHOD_VARIANTS:
+        if float(getattr(args, "cicp_alignment_weight", 0.05)) <= 0:
+            raise ValueError("cicp_alignment_weight must be positive")
+        if int(getattr(args, "cicp_alignment_warmup_epochs", 20)) <= 0:
+            raise ValueError("cicp_alignment_warmup_epochs must be positive")
+    if method_variant in CICPR1_COUNTERFACTUAL_METHOD_VARIANTS:
+        if float(getattr(args, "cicp_counterfactual_weight", 0.05)) <= 0:
+            raise ValueError("cicp_counterfactual_weight must be positive")
+        if float(getattr(args, "cicp_counterfactual_margin", 0.05)) <= 0:
+            raise ValueError("cicp_counterfactual_margin must be positive")
+    if method_variant in CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicp_attention_strength", 0.50))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicp_attention_strength must be in (0, 1]")
 
 
 def scalar_text(value):
@@ -619,6 +1130,37 @@ def build_run_config(args, model):
         "task4_competitor_margin": float(getattr(args, "task4_competitor_margin", 0.0)),
         "task4_competitor_k": int(getattr(args, "task4_competitor_k", 0)),
         "task4_boundary_competitor_cache_path": str(getattr(args, "task4_boundary_competitor_cache_path", "")),
+        "m11r2_focal_gamma": float(getattr(args, "m11r2_focal_gamma", 0.0)),
+        "m11r2_focal_temperature": float(getattr(args, "m11r2_focal_temperature", 0.0)),
+        "m11r2_curriculum_warmup_epochs": int(getattr(args, "m11r2_curriculum_warmup_epochs", 0)),
+        "m11r2_feature_dim": int(getattr(args, "m11r2_feature_dim", 0)),
+        "m11r2_feature_input_width": int(M11_FEATURE_WIDTH if uses_m11r2_feature_fusion(args) else 0),
+        "m11_feature_mode": resolve_m11_feature_mode(args) if uses_m11r2_feature_fusion(args) else "none",
+        "m11r3_residual_max_ratio": float(getattr(args, "m11r3_residual_max_ratio", 0.0)),
+        "m11r3_neighbor_loss_weight": float(getattr(args, "m11r3_neighbor_loss_weight", 0.0)),
+        "m11r3_neighbor_temperature": float(getattr(args, "m11r3_neighbor_temperature", 0.0)),
+        "m11r3_film_strength": float(getattr(args, "m11r3_film_strength", 0.0)),
+        "m11r4_expert_film_strength": float(getattr(args, "m11r4_expert_film_strength", 0.0)),
+        "m11r4_fusion_strength": float(getattr(args, "m11r4_fusion_strength", 0.0)),
+        "m11r4_relation_loss_weight": float(getattr(args, "m11r4_relation_loss_weight", 0.0)),
+        "m11r4_focal_alpha": float(getattr(args, "m11r4_focal_alpha", 0.0)),
+        "m11r4_focal_gamma": float(getattr(args, "m11r4_focal_gamma", 0.0)),
+        "m11r4_focal_temperature": float(getattr(args, "m11r4_focal_temperature", 0.0)),
+        "m11r4_focal_floor": float(getattr(args, "m11r4_focal_floor", 0.0)),
+        "cicp_profile_path": str(getattr(args, "cicp_profile_path", "")),
+        "cicp_feature_input_width": int(CICP_FEATURE_WIDTH if uses_cicp_features(args) else 0),
+        "cicp_feature_dim": int(getattr(args, "cicp_feature_dim", 0)),
+        "cicp_residual_max_ratio": float(getattr(args, "cicp_residual_max_ratio", 0.0)),
+        "cicp_modality_strength": float(getattr(args, "cicp_modality_strength", 0.0)),
+        "cicp_expert_strength": float(getattr(args, "cicp_expert_strength", 0.0)),
+        "cicp_alignment_weight": float(getattr(args, "cicp_alignment_weight", 0.0)),
+        "cicp_alignment_warmup_epochs": int(getattr(args, "cicp_alignment_warmup_epochs", 0)),
+        "cicp_counterfactual_weight": float(getattr(args, "cicp_counterfactual_weight", 0.0)),
+        "cicp_counterfactual_margin": float(getattr(args, "cicp_counterfactual_margin", 0.0)),
+        "cicp_attention_strength": float(getattr(args, "cicp_attention_strength", 0.0)),
+        "cicp_e4_residual_is_unique": method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS,
+        "training_input_uses_validation_item_metrics": False,
+        "training_input_uses_test_item_metrics": False,
         "seed": int(getattr(args, "seed", -1)),
         "num_workers": int(getattr(args, "num_workers", 0)),
         "batch_size": int(getattr(args, "batch_size", 0)),
@@ -675,6 +1217,18 @@ class CCFCRec(nn.Module):
         self.category_conf_dim = int(getattr(args, "category_conf_dim", 16))
         self.category_conf_max_count = int(getattr(args, "category_conf_max_count", 5))
         self.category_gate_scale = float(getattr(args, "category_gate_scale", 0.5))
+        self.m11r2_feature_dim = int(getattr(args, "m11r2_feature_dim", 16))
+        self.m11r3_residual_max_ratio = float(getattr(args, "m11r3_residual_max_ratio", 0.15))
+        self.m11r3_film_strength = float(getattr(args, "m11r3_film_strength", 0.1))
+        self.m11r4_expert_film_strength = float(getattr(args, "m11r4_expert_film_strength", 0.2))
+        self.m11r4_fusion_strength = float(getattr(args, "m11r4_fusion_strength", 0.25))
+        self.cicp_feature_dim = int(getattr(args, "cicp_feature_dim", 16))
+        self.cicp_residual_max_ratio = float(getattr(args, "cicp_residual_max_ratio", 0.15))
+        self.cicp_modality_strength = float(getattr(args, "cicp_modality_strength", 0.25))
+        self.cicp_expert_strength = float(getattr(args, "cicp_expert_strength", 0.20))
+        self.cicp_attention_strength = float(getattr(args, "cicp_attention_strength", 0.50))
+        self._last_m11_residual = None
+        self._last_cicp_residual = None
         self.category_bin_count = 4
         if self.uses_category_confidence():
             if self.category_conf_dim <= 0:
@@ -710,6 +1264,56 @@ class CCFCRec(nn.Module):
             self.category_conf_embedding = nn.Embedding(self.category_bin_count, self.category_conf_dim)
         if self.uses_category_fusion_gate():
             self.category_fusion_gate = nn.Linear(self.category_conf_extra_dim(), 1)
+        if self.uses_m11_residual():
+            self.m11r2_feature_projection = nn.Linear(M11_FEATURE_WIDTH, self.m11r2_feature_dim, bias=False)
+            self.m11r2_feature_to_hidden = nn.Linear(
+                self.m11r2_feature_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+        if self.uses_m11r3_dual_residual():
+            self.m11r3_global_projection = nn.Linear(M11_FEATURE_WIDTH - 1, self.m11r2_feature_dim, bias=False)
+            self.m11r3_global_to_hidden = nn.Linear(
+                self.m11r2_feature_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+        if self.uses_m11r3_film():
+            self.m11r3_film_projection = nn.Linear(M11_FEATURE_WIDTH, self.m11r2_feature_dim, bias=False)
+            self.m11r3_film_scale = nn.Linear(self.m11r2_feature_dim, args.cat_implicit_dim, bias=False)
+            self.m11r3_film_shift = nn.Linear(self.m11r2_feature_dim, args.cat_implicit_dim, bias=False)
+        if self.uses_m11r4_protected_experts():
+            self.m11r4_non_target_projection = nn.Linear(
+                M11_FEATURE_WIDTH - 1,
+                self.m11r2_feature_dim,
+                bias=False,
+            )
+            self.m11r4_non_target_scale = nn.Linear(self.m11r2_feature_dim, args.cat_implicit_dim, bias=False)
+            self.m11r4_non_target_shift = nn.Linear(self.m11r2_feature_dim, args.cat_implicit_dim, bias=False)
+        if self.uses_m11r4_continuous_fusion():
+            self.m11r4_fusion_projection = nn.Linear(M11_FEATURE_WIDTH, self.m11r2_feature_dim, bias=False)
+            self.m11r4_attr_scale = nn.Linear(self.m11r2_feature_dim, args.attr_present_dim, bias=False)
+            self.m11r4_image_scale = nn.Linear(self.m11r2_feature_dim, args.implicit_dim, bias=False)
+        if self.uses_cicpr1_e4_residual():
+            self.cicp_feature_projection = nn.Linear(
+                CICP_FEATURE_WIDTH,
+                self.cicp_feature_dim,
+                bias=False,
+            )
+            self.cicp_feature_to_hidden = nn.Linear(
+                self.cicp_feature_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+        if self.uses_cicpr1_modality_routing():
+            self.cicp_modality_gate = nn.Linear(CICP_FEATURE_WIDTH, 1)
+        if self.uses_cicpr1_category_expert():
+            self.cicp_category_expert = nn.Linear(
+                args.attr_present_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+            self.cicp_category_expert_gate = nn.Linear(CICP_FEATURE_WIDTH, 1)
         gen_input_dim = args.attr_present_dim + args.implicit_dim + self.category_conf_extra_dim()
         self.gen_layer1 = nn.Linear(gen_input_dim, args.cat_implicit_dim)
         self.gen_layer2 = nn.Linear(args.attr_present_dim, args.attr_present_dim)
@@ -721,6 +1325,51 @@ class CCFCRec(nn.Module):
 
     def uses_category_fusion_gate(self):
         return self.method_variant == "category_conf_fusion_gate"
+
+    def uses_m11r2_feature_fusion(self):
+        return self.method_variant in M11R2_FEATURE_METHOD_VARIANTS
+
+    def uses_m11_residual(self):
+        return self.method_variant in (
+            {"m11r2_target_feature_fusion"}
+            | M11R3_DUAL_RESIDUAL_METHOD_VARIANTS
+            | M11R3_NORM_CAPPED_METHOD_VARIANTS
+            | M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS
+            | M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
+        )
+
+    def uses_m11r3_dual_residual(self):
+        return self.method_variant in M11R3_DUAL_RESIDUAL_METHOD_VARIANTS
+
+    def uses_m11r3_norm_cap(self):
+        return self.method_variant in M11R3_NORM_CAPPED_METHOD_VARIANTS
+
+    def uses_m11r3_neighbor_transfer(self):
+        return self.method_variant in M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS
+
+    def uses_m11r3_film(self):
+        return self.method_variant in M11R3_FILM_METHOD_VARIANTS
+
+    def uses_m11r4_protected_experts(self):
+        return self.method_variant in M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
+
+    def uses_m11r4_continuous_fusion(self):
+        return self.method_variant in M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
+
+    def uses_cicp_features(self):
+        return self.method_variant in CICPR1_METHOD_VARIANTS
+
+    def uses_cicpr1_e4_residual(self):
+        return self.method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS
+
+    def uses_cicpr1_modality_routing(self):
+        return self.method_variant in CICPR1_MODALITY_ROUTING_METHOD_VARIANTS
+
+    def uses_cicpr1_category_expert(self):
+        return self.method_variant in CICPR1_CATEGORY_EXPERT_METHOD_VARIANTS
+
+    def uses_cicpr1_adaptive_attention(self):
+        return self.method_variant in CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS
 
     def category_conf_extra_dim(self):
         if self.uses_category_confidence():
@@ -745,6 +1394,37 @@ class CCFCRec(nn.Module):
         if self.uses_category_fusion_gate():
             nn.init.zeros_(self.category_fusion_gate.weight)
             nn.init.zeros_(self.category_fusion_gate.bias)
+        if self.uses_m11_residual():
+            nn.init.xavier_normal_(self.m11r2_feature_projection.weight)
+            if self.uses_m11r3_neighbor_transfer():
+                nn.init.zeros_(self.m11r2_feature_to_hidden.weight)
+            else:
+                nn.init.xavier_normal_(self.m11r2_feature_to_hidden.weight)
+        if self.uses_m11r3_dual_residual():
+            nn.init.xavier_normal_(self.m11r3_global_projection.weight)
+            nn.init.zeros_(self.m11r3_global_to_hidden.weight)
+        if self.uses_m11r3_film():
+            nn.init.xavier_normal_(self.m11r3_film_projection.weight)
+            nn.init.zeros_(self.m11r3_film_scale.weight)
+            nn.init.zeros_(self.m11r3_film_shift.weight)
+        if self.uses_m11r4_protected_experts():
+            nn.init.xavier_normal_(self.m11r4_non_target_projection.weight)
+            nn.init.zeros_(self.m11r4_non_target_scale.weight)
+            nn.init.zeros_(self.m11r4_non_target_shift.weight)
+        if self.uses_m11r4_continuous_fusion():
+            nn.init.xavier_normal_(self.m11r4_fusion_projection.weight)
+            nn.init.zeros_(self.m11r4_attr_scale.weight)
+            nn.init.zeros_(self.m11r4_image_scale.weight)
+        if self.uses_cicpr1_e4_residual():
+            nn.init.xavier_normal_(self.cicp_feature_projection.weight)
+            nn.init.xavier_normal_(self.cicp_feature_to_hidden.weight)
+        if self.uses_cicpr1_modality_routing():
+            nn.init.zeros_(self.cicp_modality_gate.weight)
+            nn.init.zeros_(self.cicp_modality_gate.bias)
+        if self.uses_cicpr1_category_expert():
+            nn.init.xavier_normal_(self.cicp_category_expert.weight)
+            nn.init.zeros_(self.cicp_category_expert_gate.weight)
+            nn.init.constant_(self.cicp_category_expert_gate.bias, -2.0)
 
     def build_category_conf_bins(self, attribute):
         category_count = (attribute != -1).sum(dim=1)
@@ -774,27 +1454,150 @@ class CCFCRec(nn.Module):
         return final_attr_emb * attr_scale, p_v * image_scale
 
     def build_generator_input(self, final_attr_emb, p_v, attribute):
-        if not self.uses_category_confidence():
-            return torch.cat((final_attr_emb, p_v), dim=1)
-        category_conf_features = self.build_category_conf_features(attribute)
-        final_attr_emb, p_v = self.apply_category_fusion_gate(final_attr_emb, p_v, category_conf_features)
-        return torch.cat((final_attr_emb, p_v, category_conf_features), dim=1)
+        parts = [final_attr_emb, p_v]
+        if self.uses_category_confidence():
+            category_conf_features = self.build_category_conf_features(attribute)
+            final_attr_emb, p_v = self.apply_category_fusion_gate(final_attr_emb, p_v, category_conf_features)
+            parts = [final_attr_emb, p_v, category_conf_features]
+        return torch.cat(parts, dim=1)
 
-    def encode_content_components(self, attribute, image_feature, batch_size):
+    def encode_content_components(
+        self,
+        attribute,
+        image_feature,
+        batch_size,
+        m11_features=None,
+        cicp_features=None,
+    ):
+        self._last_m11_residual = None
+        self._last_cicp_residual = None
+        features = None
+        if self.uses_m11r2_feature_fusion():
+            if m11_features is None:
+                raise ValueError(f"m11_features are required for {self.method_variant}")
+            if m11_features.ndim != 2 or m11_features.shape[1] != M11_FEATURE_WIDTH:
+                raise ValueError(
+                    f"m11_features must have shape [batch,{M11_FEATURE_WIDTH}], got {tuple(m11_features.shape)}"
+                )
+            features = m11_features.to(dtype=self.attr_matrix.dtype)
+        cicp = None
+        if self.uses_cicp_features():
+            if cicp_features is None:
+                raise ValueError(f"cicp_features are required for {self.method_variant}")
+            if cicp_features.ndim != 2 or cicp_features.shape[1] != CICP_FEATURE_WIDTH:
+                raise ValueError(
+                    f"cicp_features must have shape [batch,{CICP_FEATURE_WIDTH}], "
+                    f"got {tuple(cicp_features.shape)}"
+                )
+            cicp = cicp_features.to(dtype=self.attr_matrix.dtype)
         z_v = torch.matmul(torch.matmul(self.attr_matrix, self.attr_W1)+self.attr_b1.squeeze(), self.attr_W2)
         z_v_copy = z_v.repeat(batch_size, 1, 1)
         z_v_squeeze = z_v_copy.squeeze(dim=2)
         neg_inf = torch.full_like(z_v_squeeze, -1e6)
         z_v_mask = torch.where(attribute != -1, z_v_squeeze, neg_inf)
+        if self.uses_cicpr1_adaptive_attention():
+            centered_score = 2.0 * cicp[:, :1].clamp(0.0, 1.0) - 1.0
+            attention_temperature = torch.exp(-self.cicp_attention_strength * centered_score)
+            z_v_mask = z_v_mask / attention_temperature
         attr_attention_weight = torch.softmax(z_v_mask, dim=1)
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
+        if self.uses_cicpr1_modality_routing():
+            delta = self.cicp_modality_strength * torch.tanh(self.cicp_modality_gate(cicp))
+            final_attr_emb = final_attr_emb * (1.0 + delta)
+            p_v = p_v * (1.0 - delta)
+        if self.uses_m11r4_continuous_fusion():
+            condition = self.h(self.m11r4_fusion_projection(features))
+            signal = 0.5 + 0.5 * features[:, 1:2].clamp(0.0, 1.0)
+            attr_scale = torch.tanh(self.m11r4_attr_scale(condition)) * signal
+            image_scale = torch.tanh(self.m11r4_image_scale(condition)) * signal
+            final_attr_emb = final_attr_emb * (1.0 + self.m11r4_fusion_strength * attr_scale)
+            p_v = p_v * (1.0 + self.m11r4_fusion_strength * image_scale)
         q_v_a = self.build_generator_input(final_attr_emb, p_v, attribute)
-        q_v_c = self.gen_layer2(self.h(self.gen_layer1(q_v_a)))
+        hidden = self.gen_layer1(q_v_a)
+        if self.uses_cicpr1_e4_residual():
+            cicp_residual = self.cicp_feature_to_hidden(
+                self.h(self.cicp_feature_projection(cicp))
+            )
+            cicp_residual = cap_cicp_residual_norm(
+                cicp_residual,
+                hidden,
+                self.cicp_residual_max_ratio,
+            )
+            self._last_cicp_residual = cicp_residual
+            hidden = hidden + cicp_residual
+        elif self.uses_cicpr1_category_expert():
+            expert_hidden = self.cicp_category_expert(final_attr_emb)
+            expert_gate = (
+                self.cicp_expert_strength
+                * cicp[:, :1].clamp(0.0, 1.0)
+                * torch.sigmoid(self.cicp_category_expert_gate(cicp))
+            )
+            hidden = (1.0 - expert_gate) * hidden + expert_gate * expert_hidden
+        if self.uses_m11r2_feature_fusion():
+            features = features.to(hidden.dtype)
+            if self.uses_m11r3_film():
+                condition = self.h(self.m11r3_film_projection(features))
+                scale = torch.tanh(self.m11r3_film_scale(condition))
+                shift = torch.tanh(self.m11r3_film_shift(condition))
+                hidden_rms = hidden.detach().pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
+                modulated = (
+                    hidden * (1.0 + self.m11r3_film_strength * scale)
+                    + self.m11r3_film_strength * hidden_rms * shift
+                )
+                self._last_m11_residual = modulated - hidden
+                hidden = modulated
+            elif self.uses_m11r4_protected_experts():
+                base_hidden = hidden
+                target_gate = features[:, :1].clamp(0.0, 1.0)
+                non_target_gate = 1.0 - target_gate
+                target_residual = self.m11r2_feature_to_hidden(
+                    self.h(self.m11r2_feature_projection(features * target_gate))
+                ) * target_gate
+                target_hidden = base_hidden + target_residual
+
+                non_target_condition = self.h(self.m11r4_non_target_projection(features[:, 1:]))
+                non_target_scale = torch.tanh(self.m11r4_non_target_scale(non_target_condition))
+                non_target_shift = torch.tanh(self.m11r4_non_target_shift(non_target_condition))
+                hidden_rms = base_hidden.detach().pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
+                non_target_hidden = (
+                    base_hidden * (1.0 + self.m11r4_expert_film_strength * non_target_scale)
+                    + self.m11r4_expert_film_strength * hidden_rms * non_target_shift
+                )
+                hidden = target_gate * target_hidden + non_target_gate * non_target_hidden
+                self._last_m11_residual = hidden - base_hidden
+            elif self.uses_m11_residual():
+                residual_features = features
+                if self.uses_m11r3_dual_residual():
+                    target_gate = features[:, :1]
+                    residual_features = features * target_gate
+                feature_hidden = self.m11r2_feature_to_hidden(
+                    self.h(self.m11r2_feature_projection(residual_features))
+                )
+                if self.uses_m11r3_dual_residual():
+                    global_hidden = self.m11r3_global_to_hidden(
+                        self.h(self.m11r3_global_projection(features[:, 1:]))
+                    )
+                    feature_hidden = feature_hidden + global_hidden
+                if self.uses_m11r3_norm_cap():
+                    feature_hidden = cap_m11_residual_norm(
+                        feature_hidden,
+                        hidden,
+                        self.m11r3_residual_max_ratio,
+                    )
+                self._last_m11_residual = feature_hidden
+                hidden = hidden + feature_hidden
+        q_v_c = self.gen_layer2(self.h(hidden))
         return q_v_c, final_attr_emb, p_v
 
-    def forward(self, attribute, image_feature, batch_size):
-        q_v_c, _, _ = self.encode_content_components(attribute, image_feature, batch_size)
+    def forward(self, attribute, image_feature, batch_size, m11_features=None, cicp_features=None):
+        q_v_c, _, _ = self.encode_content_components(
+            attribute,
+            image_feature,
+            batch_size,
+            m11_features=m11_features,
+            cicp_features=cicp_features,
+        )
         return q_v_c
 
 
@@ -824,6 +1627,27 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
     )
     if task4_item_weights is not None:
         task4_item_weights = task4_item_weights.to(device, non_blocking=non_blocking)
+    m11r2_target_scores = load_m11r2_target_score_tensor(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if m11r2_target_scores is not None:
+        m11r2_target_scores = m11r2_target_scores.to(device, non_blocking=non_blocking)
+    m11r2_feature_tensor = load_m11r2_feature_tensor(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if m11r2_feature_tensor is not None:
+        m11r2_feature_tensor = m11r2_feature_tensor.to(device, non_blocking=non_blocking)
+    cicpr1_feature_tensor = load_cicpr1_feature_tensor(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if cicpr1_feature_tensor is not None:
+        cicpr1_feature_tensor = cicpr1_feature_tensor.to(device, non_blocking=non_blocking)
     task4_pair_margin_targets = load_task4_pair_margin_targets(
         train_loader.dataset.item_serialize_dict,
         args,
@@ -869,6 +1693,21 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             item_genres = item_category_tensor[item]
             item_img_feature = item_image_feature_tensor[item]
             task4_batch_weights = task4_item_weights[item] if task4_item_weights is not None else None
+            if getattr(args, "method_variant", "baseline") == "m11r2_qbpr_curriculum":
+                task4_batch_weights = build_m11r2_curriculum_weights(
+                    task4_batch_weights,
+                    i_epoch,
+                    getattr(args, "m11r2_curriculum_warmup_epochs", 20),
+                )
+            m11r2_batch_target_scores = (
+                m11r2_target_scores[item] if m11r2_target_scores is not None else None
+            )
+            m11r2_batch_features = (
+                m11r2_feature_tensor[item] if m11r2_feature_tensor is not None else None
+            )
+            cicpr1_batch_features = (
+                cicpr1_feature_tensor[item] if cicpr1_feature_tensor is not None else None
+            )
             task4_batch_pair_margin_targets = (
                 {name: tensor[item] for name, tensor in task4_pair_margin_targets.items()}
                 if task4_pair_margin_targets is not None
@@ -880,7 +1719,35 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 else None
             )
             # run model
-            q_v_c = model(item_genres, item_img_feature, user.shape[0])
+            q_v_c = model(
+                item_genres,
+                item_img_feature,
+                user.shape[0],
+                m11_features=m11r2_batch_features,
+                cicp_features=cicpr1_batch_features,
+            )
+            cicpr1_alignment_sum = q_v_c.new_tensor(0.0)
+            if getattr(args, "method_variant", "baseline") in CICPR1_ALIGNMENT_METHOD_VARIANTS:
+                cicpr1_alignment_sum = build_cicpr1_alignment_loss(
+                    q_v_c,
+                    model.item_embedding[item],
+                    cicpr1_batch_features,
+                    i_epoch,
+                    args,
+                ) * float(getattr(args, "cicp_alignment_weight", 0.05))
+            m11r3_neighbor_transfer_sum = q_v_c.new_tensor(0.0)
+            if getattr(args, "method_variant", "baseline") in M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS:
+                m11r3_neighbor_transfer_sum = build_m11r3_neighbor_transfer_loss(
+                    model._last_m11_residual,
+                    m11r2_batch_features,
+                    temperature=getattr(args, "m11r3_neighbor_temperature", 0.25),
+                ) * float(getattr(args, "m11r3_neighbor_loss_weight", 0.1))
+            m11r4_relational_alignment_sum = q_v_c.new_tensor(0.0)
+            if getattr(args, "method_variant", "baseline") in M11R4_RELATIONAL_ALIGNMENT_METHOD_VARIANTS:
+                m11r4_relational_alignment_sum = build_m11r4_relational_alignment_loss(
+                    q_v_c,
+                    m11r2_batch_features,
+                ) * float(getattr(args, "m11r4_relation_loss_weight", 0.05))
             q_v_c_unsqueeze = q_v_c.unsqueeze(dim=1)
             # compute contrast loss
             positive_item_emb = model.item_embedding[positive_item_list]
@@ -898,7 +1765,20 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             contrast_examples_num = contrast_val.shape[0] * contrast_val.shape[1]
             contrast_per_item = torch.sum(contrast_val, dim=1) / contrast_val.shape[1]
             category_weights = build_category_reweight(item_genres, args)
-            if task4_batch_weights is not None:
+            m11r4_focal_temperature = float(getattr(args, "m11r4_focal_temperature", 0.5))
+            m11r4_contrast_weights = None
+            if getattr(args, "method_variant", "baseline") in M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS:
+                contrast_difficulty = 1.0 - torch.exp(
+                    -contrast_per_item.detach().clamp_min(0.0) / m11r4_focal_temperature
+                )
+                m11r4_contrast_weights = build_m11r4_continuous_focal_weights(
+                    contrast_difficulty,
+                    m11r2_batch_features,
+                    args,
+                )
+            if m11r4_contrast_weights is not None:
+                contrast_sum = weighted_sum(contrast_per_item, m11r4_contrast_weights, True)
+            elif task4_batch_weights is not None:
                 contrast_sum = weighted_sum(contrast_per_item, task4_batch_weights, getattr(args, "task4_reweight_contrast", False))
             else:
                 contrast_sum = weighted_sum(contrast_per_item, category_weights, args.reweight_contrast)
@@ -914,7 +1794,19 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                     args.tau * torch.norm(q_v_c, dim=1) * torch.norm(item_emb, dim=1))
             self_pos_contrast_exp = torch.exp(self_pos_contrast_mul)  # shape = 1024*1
             self_contrast_val = -torch.log(self_pos_contrast_exp/(self_pos_contrast_exp+self_neg_contrast_sum))
-            if task4_batch_weights is not None:
+            m11r4_self_weights = None
+            if getattr(args, "method_variant", "baseline") in M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS:
+                self_difficulty = 1.0 - torch.exp(
+                    -self_contrast_val.detach().clamp_min(0.0) / m11r4_focal_temperature
+                )
+                m11r4_self_weights = build_m11r4_continuous_focal_weights(
+                    self_difficulty,
+                    m11r2_batch_features,
+                    args,
+                )
+            if m11r4_self_weights is not None:
+                self_contrast_sum = weighted_sum(self_contrast_val, m11r4_self_weights, True)
+            elif task4_batch_weights is not None:
                 self_contrast_sum = weighted_sum(
                     self_contrast_val,
                     task4_batch_weights,
@@ -935,9 +1827,50 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             y_kv2 = torch.mul(q_v_c, neg_user_emb).sum(dim=1)
             y_q_margin_diff = y_uv2 - y_kv2
             y_ukv2_per_item = -logsigmoid(y_uv2 - y_kv2)
+            cicpr1_counterfactual_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPR1_COUNTERFACTUAL_METHOD_VARIANTS
+                and item_genres.shape[0] > 1
+            ):
+                shuffled_item_genres = torch.roll(item_genres, shifts=1, dims=0)
+                shuffled_q_v_c = model(
+                    shuffled_item_genres,
+                    item_img_feature,
+                    user.shape[0],
+                    cicp_features=cicpr1_batch_features,
+                )
+                shuffled_positive_score = torch.mul(shuffled_q_v_c, user_emb).sum(dim=1)
+                shuffled_negative_score = torch.mul(shuffled_q_v_c, neg_user_emb).sum(dim=1)
+                shuffled_margin = shuffled_positive_score - shuffled_negative_score
+                cicpr1_counterfactual_sum = build_cicpr1_counterfactual_margin_loss(
+                    y_q_margin_diff,
+                    shuffled_margin,
+                    cicpr1_batch_features,
+                    args,
+                ) * float(getattr(args, "cicp_counterfactual_weight", 0.05))
             adaptive_qbpr_weights = build_adaptive_qbpr_weights(item_genres, support_confidence, args)
-            if adaptive_qbpr_weights is not None:
+            m11r4_qbpr_weights = None
+            if getattr(args, "method_variant", "baseline") in M11R4_CONTINUOUS_FOCAL_METHOD_VARIANTS:
+                qbpr_difficulty = torch.sigmoid(
+                    -y_q_margin_diff.detach() / m11r4_focal_temperature
+                )
+                m11r4_qbpr_weights = build_m11r4_continuous_focal_weights(
+                    qbpr_difficulty,
+                    m11r2_batch_features,
+                    args,
+                )
+            if m11r4_qbpr_weights is not None:
+                y_ukv2 = weighted_sum(y_ukv2_per_item, m11r4_qbpr_weights, True)
+            elif adaptive_qbpr_weights is not None:
                 y_ukv2 = weighted_sum(y_ukv2_per_item, adaptive_qbpr_weights, True)
+            elif m11r2_batch_target_scores is not None:
+                focal_weights = build_m11r2_focal_qbpr_weights(
+                    y_q_margin_diff,
+                    m11r2_batch_target_scores,
+                    args,
+                )
+                y_ukv2 = weighted_sum(y_ukv2_per_item, focal_weights, True)
             elif task4_batch_weights is not None:
                 y_ukv2 = weighted_sum(
                     y_ukv2_per_item,
@@ -960,6 +1893,10 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 + (1-args.lambda1)*(y_ukv+y_ukv2)
                 + task4_pair_margin_sum
                 + task4_competitor_pair_sum
+                + m11r3_neighbor_transfer_sum
+                + m11r4_relational_alignment_sum
+                + cicpr1_alignment_sum
+                + cicpr1_counterfactual_sum
             )
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
@@ -1049,7 +1986,21 @@ if __name__ == '__main__':
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)
     optimizer = torch.optim.Adam(myModel.parameters(), lr=args.learning_rate, weight_decay=0.1)
-    validator = Validate(validate_csv=vliad_path, user_serialize_dict=user_ser_dict, img=img_feature_dict,
-                         genres=asin_category_int_map, category_num=category_ser_map.__len__(),
-                         batch_size=args.validate_batch_size)
+    validator = Validate(
+        validate_csv=vliad_path,
+        user_serialize_dict=user_ser_dict,
+        img=img_feature_dict,
+        genres=asin_category_int_map,
+        category_num=category_ser_map.__len__(),
+        batch_size=args.validate_batch_size,
+        task4_profile_path=args.task4_profile_path,
+        use_m11_features=uses_m11r2_feature_fusion(args),
+        m11_feature_mode=resolve_m11_feature_mode(args),
+        reject_m11_evaluation_columns=(
+            getattr(args, "method_variant", "baseline") in M11R4_FEATURE_METHOD_VARIANTS
+        ),
+        cicp_profile_path=args.cicp_profile_path,
+        use_cicp_features=uses_cicp_features(args),
+        reject_cicp_evaluation_columns=True,
+    )
     train(myModel, train_loader, optimizer, validator, args, save_dir)
