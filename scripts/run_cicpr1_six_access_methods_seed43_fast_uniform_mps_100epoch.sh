@@ -65,7 +65,8 @@ fi
 DEFAULT_RESULT_ROOT="/Volumes/MyPassport/CCFCRec对比学习思路硬盘/实验记录硬盘/ccfcrec_result/${RUN_STAMP}_${EXPERIMENT_ID}_seed${SEED}_workers${NUM_WORKERS}_${NEGATIVE_SAMPLING_MODE}_${CCFCREC_DEVICE}_${EPOCH}epoch"
 export RESULT_ROOT="${RESULT_ROOT:-${DEFAULT_RESULT_ROOT}}"
 mkdir -p "${RESULT_ROOT}/logs" "${RESULT_ROOT}/status" "${RESULT_ROOT}/protocol" "${RESULT_ROOT}/runs"
-printf '%s\n' "${RESULT_ROOT}" > "${REPO_ROOT}/cicpr1_six_access_methods_latest_result_root.txt"
+LATEST_POINTER="${CICPR1_LATEST_POINTER:-${REPO_ROOT}/cicpr1_six_access_methods_latest_result_root.txt}"
+printf '%s\n' "${RESULT_ROOT}" > "${LATEST_POINTER}"
 
 TRAINING_PROFILE="${RESULT_ROOT}/protocol/cicpr1_train_validate_score_only_profile.csv"
 PROFILE_AUDIT="${RESULT_ROOT}/protocol/cicpr1_profile_audit.json"

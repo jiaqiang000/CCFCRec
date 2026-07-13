@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${RESULT_ROOT}" ]]; then
-  POINTER="${REPO_ROOT}/cicpr1_six_access_methods_latest_result_root.txt"
+  POINTER="${CICPR1_LATEST_POINTER:-${REPO_ROOT}/cicpr1_six_access_methods_latest_result_root.txt}"
   if [[ ! -f "${POINTER}" ]]; then
     echo "CICP-R1 result pointer not found: ${POINTER}" >&2
     exit 1
