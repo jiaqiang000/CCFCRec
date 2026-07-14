@@ -79,6 +79,12 @@ def get_args():
             'cicpr1_alignment_curriculum',
             'cicpr1_counterfactual_margin',
             'cicpr1_adaptive_attention',
+            'cicpr2_content_direction_residual',
+            'cicpr2_category_increment_gate',
+            'cicpr2_cross_modal_attention',
+            'cicpr2_score_distillation',
+            'cicpr2_ordinal_counterfactual',
+            'cicpr2_reliability_dropout',
         ],
         help='training method variant',
     )
@@ -128,6 +134,14 @@ def get_args():
     parser.add_argument('--cicp_counterfactual_weight', type=float, default=0.05, help='CICP category counterfactual objective weight')
     parser.add_argument('--cicp_counterfactual_margin', type=float, default=0.05, help='CICP real-vs-shuffled category margin target')
     parser.add_argument('--cicp_attention_strength', type=float, default=0.50, help='CICP category attention log-temperature strength')
+    parser.add_argument('--cicpr2_residual_max_ratio', type=float, default=0.15, help='maximum norm ratio for the sole CICP-R2 content-directed hidden residual')
+    parser.add_argument('--cicpr2_increment_strength', type=float, default=0.50, help='centered CICP strength for explicit category-increment scaling')
+    parser.add_argument('--cicpr2_cross_attention_strength', type=float, default=0.50, help='maximum CICP share of image-query category attention')
+    parser.add_argument('--cicpr2_cross_attention_temperature', type=float, default=0.25, help='cosine-attention temperature for CICP-R2 image-query category selection')
+    parser.add_argument('--cicpr2_distillation_weight', type=float, default=0.05, help='CICP score distillation auxiliary-loss weight')
+    parser.add_argument('--cicpr2_ordinal_weight', type=float, default=0.05, help='CICP counterfactual ordinal auxiliary-loss weight')
+    parser.add_argument('--cicpr2_ordinal_margin', type=float, default=0.02, help='category-increment ordering margin for CICP-R2')
+    parser.add_argument('--cicpr2_category_dropout_max', type=float, default=0.50, help='maximum whole-category dropout probability at CICP score zero')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

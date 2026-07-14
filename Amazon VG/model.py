@@ -89,6 +89,25 @@ CICPR1_METHOD_VARIANTS = (
     | CICPR1_COUNTERFACTUAL_METHOD_VARIANTS
     | CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS
 )
+CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS = {
+    "cicpr2_content_direction_residual"
+}
+CICPR2_CATEGORY_INCREMENT_METHOD_VARIANTS = {"cicpr2_category_increment_gate"}
+CICPR2_CROSS_MODAL_ATTENTION_METHOD_VARIANTS = {"cicpr2_cross_modal_attention"}
+CICPR2_SCORE_DISTILLATION_METHOD_VARIANTS = {"cicpr2_score_distillation"}
+CICPR2_ORDINAL_COUNTERFACTUAL_METHOD_VARIANTS = {
+    "cicpr2_ordinal_counterfactual"
+}
+CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS = {"cicpr2_reliability_dropout"}
+CICPR2_METHOD_VARIANTS = (
+    CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS
+    | CICPR2_CATEGORY_INCREMENT_METHOD_VARIANTS
+    | CICPR2_CROSS_MODAL_ATTENTION_METHOD_VARIANTS
+    | CICPR2_SCORE_DISTILLATION_METHOD_VARIANTS
+    | CICPR2_ORDINAL_COUNTERFACTUAL_METHOD_VARIANTS
+    | CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS
+)
+CICP_METHOD_VARIANTS = CICPR1_METHOD_VARIANTS | CICPR2_METHOD_VARIANTS
 M11R4_FEATURE_METHOD_VARIANTS = (
     M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
     | M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
@@ -240,7 +259,7 @@ def uses_m11r2_feature_fusion(args):
 
 
 def uses_cicp_features(args):
-    return getattr(args, "method_variant", "baseline") in CICPR1_METHOD_VARIANTS
+    return getattr(args, "method_variant", "baseline") in CICP_METHOD_VARIANTS
 
 
 def resolve_m11_feature_mode(args):
@@ -636,6 +655,70 @@ def build_cicpr1_counterfactual_margin_loss(real_margin, shuffled_margin, cicp_f
     return (score * F.softplus(target_gap - observed_gap)).sum()
 
 
+def build_cicpr2_score_distillation_loss(predicted_score, cicp_features):
+    if predicted_score is None or cicp_features is None:
+        reference = predicted_score if predicted_score is not None else cicp_features
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if predicted_score.ndim != 1:
+        raise ValueError("CICP-R2 predicted scores must be one-dimensional")
+    if cicp_features.ndim != 2 or cicp_features.shape != (
+        predicted_score.shape[0],
+        CICP_FEATURE_WIDTH,
+    ):
+        raise ValueError(
+            f"CICP-R2 distillation features must have shape [batch,{CICP_FEATURE_WIDTH}]"
+        )
+    score = cicp_features[:, 0].detach().to(dtype=predicted_score.dtype).clamp(0.0, 1.0)
+    return F.smooth_l1_loss(predicted_score, score, reduction="sum")
+
+
+def build_cicpr2_ordinal_counterfactual_loss(
+    real_embedding,
+    shuffled_embedding,
+    item_embedding,
+    cicp_features,
+    args,
+):
+    if real_embedding is None or shuffled_embedding is None or item_embedding is None:
+        reference = real_embedding if real_embedding is not None else shuffled_embedding
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if real_embedding.ndim != 2 or shuffled_embedding.shape != real_embedding.shape:
+        raise ValueError("CICP-R2 real and shuffled embeddings must have the same 2D shape")
+    if item_embedding.shape != real_embedding.shape:
+        raise ValueError("CICP-R2 item teacher must match generated embedding shape")
+    if cicp_features is None or cicp_features.shape != (
+        real_embedding.shape[0],
+        CICP_FEATURE_WIDTH,
+    ):
+        raise ValueError(
+            f"CICP-R2 ordinal features must have shape [batch,{CICP_FEATURE_WIDTH}]"
+        )
+    pair_count = real_embedding.shape[0] // 2
+    if pair_count == 0:
+        return real_embedding.new_tensor(0.0)
+
+    teacher = item_embedding.detach()
+    real_similarity = F.cosine_similarity(real_embedding, teacher, dim=1, eps=1e-6)
+    shuffled_similarity = F.cosine_similarity(shuffled_embedding, teacher, dim=1, eps=1e-6)
+    observed_increment = real_similarity - shuffled_similarity
+    score = cicp_features[:, 0].detach().to(dtype=observed_increment.dtype).clamp(0.0, 1.0)
+    order = torch.argsort(score)
+    low_index = order[:pair_count]
+    high_index = order[-pair_count:]
+    score_gap = (score[high_index] - score[low_index]).clamp_min(1e-6)
+    increment_gap = observed_increment[high_index] - observed_increment[low_index]
+    margin = float(getattr(args, "cicpr2_ordinal_margin", 0.02))
+    if margin <= 0:
+        raise ValueError("cicpr2_ordinal_margin must be positive")
+    per_pair = F.softplus(margin - increment_gap)
+    normalized = (per_pair * score_gap).sum() / score_gap.sum().clamp_min(1e-12)
+    return normalized * real_embedding.shape[0]
+
+
 def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=None):
     if not uses_task4_pair_margin(args):
         return None
@@ -856,7 +939,7 @@ def load_cicpr1_feature_tensor(item_serialize_dict, args, item_number=None):
         return None
     profile_path = getattr(args, "cicp_profile_path", "")
     if not profile_path:
-        raise ValueError("cicp_profile_path is required for CICP-R1 variants")
+        raise ValueError("cicp_profile_path is required for CICP variants")
     return load_cicp_feature_tensor(
         profile_path,
         item_serialize_dict,
@@ -1054,9 +1137,9 @@ def validate_method_args(args):
         floor = float(getattr(args, "m11r4_focal_floor", 0.35))
         if floor <= 0 or floor > 1:
             raise ValueError("m11r4_focal_floor must be in (0, 1]")
-    if method_variant in CICPR1_METHOD_VARIANTS:
+    if method_variant in CICP_METHOD_VARIANTS:
         if not str(getattr(args, "cicp_profile_path", "")).strip():
-            raise ValueError("cicp_profile_path is required for CICP-R1 variants")
+            raise ValueError("cicp_profile_path is required for CICP variants")
     if method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS:
         if int(getattr(args, "cicp_feature_dim", 16)) <= 0:
             raise ValueError("cicp_feature_dim must be positive")
@@ -1085,6 +1168,32 @@ def validate_method_args(args):
         strength = float(getattr(args, "cicp_attention_strength", 0.50))
         if strength <= 0 or strength > 1:
             raise ValueError("cicp_attention_strength must be in (0, 1]")
+    if method_variant in CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS:
+        ratio = float(getattr(args, "cicpr2_residual_max_ratio", 0.15))
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("cicpr2_residual_max_ratio must be in (0, 1]")
+    if method_variant in CICPR2_CATEGORY_INCREMENT_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicpr2_increment_strength", 0.50))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicpr2_increment_strength must be in (0, 1]")
+    if method_variant in CICPR2_CROSS_MODAL_ATTENTION_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicpr2_cross_attention_strength", 0.50))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicpr2_cross_attention_strength must be in (0, 1]")
+        if float(getattr(args, "cicpr2_cross_attention_temperature", 0.25)) <= 0:
+            raise ValueError("cicpr2_cross_attention_temperature must be positive")
+    if method_variant in CICPR2_SCORE_DISTILLATION_METHOD_VARIANTS:
+        if float(getattr(args, "cicpr2_distillation_weight", 0.05)) <= 0:
+            raise ValueError("cicpr2_distillation_weight must be positive")
+    if method_variant in CICPR2_ORDINAL_COUNTERFACTUAL_METHOD_VARIANTS:
+        if float(getattr(args, "cicpr2_ordinal_weight", 0.05)) <= 0:
+            raise ValueError("cicpr2_ordinal_weight must be positive")
+        if float(getattr(args, "cicpr2_ordinal_margin", 0.02)) <= 0:
+            raise ValueError("cicpr2_ordinal_margin must be positive")
+    if method_variant in CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS:
+        dropout = float(getattr(args, "cicpr2_category_dropout_max", 0.50))
+        if dropout <= 0 or dropout >= 1:
+            raise ValueError("cicpr2_category_dropout_max must be in (0, 1)")
 
 
 def scalar_text(value):
@@ -1159,6 +1268,26 @@ def build_run_config(args, model):
         "cicp_counterfactual_margin": float(getattr(args, "cicp_counterfactual_margin", 0.0)),
         "cicp_attention_strength": float(getattr(args, "cicp_attention_strength", 0.0)),
         "cicp_e4_residual_is_unique": method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS,
+        "cicpr2_residual_max_ratio": float(getattr(args, "cicpr2_residual_max_ratio", 0.0)),
+        "cicpr2_increment_strength": float(getattr(args, "cicpr2_increment_strength", 0.0)),
+        "cicpr2_cross_attention_strength": float(
+            getattr(args, "cicpr2_cross_attention_strength", 0.0)
+        ),
+        "cicpr2_cross_attention_temperature": float(
+            getattr(args, "cicpr2_cross_attention_temperature", 0.0)
+        ),
+        "cicpr2_distillation_weight": float(
+            getattr(args, "cicpr2_distillation_weight", 0.0)
+        ),
+        "cicpr2_ordinal_weight": float(getattr(args, "cicpr2_ordinal_weight", 0.0)),
+        "cicpr2_ordinal_margin": float(getattr(args, "cicpr2_ordinal_margin", 0.0)),
+        "cicpr2_category_dropout_max": float(
+            getattr(args, "cicpr2_category_dropout_max", 0.0)
+        ),
+        "cicpr2_e4_style_residual_is_unique": (
+            method_variant in CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS
+        ),
+        "cicpr2_independent_signal_width": 1 if method_variant in CICPR2_METHOD_VARIANTS else 0,
         "training_input_uses_validation_item_metrics": False,
         "training_input_uses_test_item_metrics": False,
         "seed": int(getattr(args, "seed", -1)),
@@ -1227,6 +1356,21 @@ class CCFCRec(nn.Module):
         self.cicp_modality_strength = float(getattr(args, "cicp_modality_strength", 0.25))
         self.cicp_expert_strength = float(getattr(args, "cicp_expert_strength", 0.20))
         self.cicp_attention_strength = float(getattr(args, "cicp_attention_strength", 0.50))
+        self.cicpr2_residual_max_ratio = float(
+            getattr(args, "cicpr2_residual_max_ratio", 0.15)
+        )
+        self.cicpr2_increment_strength = float(
+            getattr(args, "cicpr2_increment_strength", 0.50)
+        )
+        self.cicpr2_cross_attention_strength = float(
+            getattr(args, "cicpr2_cross_attention_strength", 0.50)
+        )
+        self.cicpr2_cross_attention_temperature = float(
+            getattr(args, "cicpr2_cross_attention_temperature", 0.25)
+        )
+        self.cicpr2_category_dropout_max = float(
+            getattr(args, "cicpr2_category_dropout_max", 0.50)
+        )
         self._last_m11_residual = None
         self._last_cicp_residual = None
         self.category_bin_count = 4
@@ -1314,6 +1458,35 @@ class CCFCRec(nn.Module):
                 bias=False,
             )
             self.cicp_category_expert_gate = nn.Linear(CICP_FEATURE_WIDTH, 1)
+        if self.uses_cicpr2_content_direction_residual():
+            self.cicpr2_residual_category_direction = nn.Linear(
+                args.attr_present_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+            self.cicpr2_residual_image_direction = nn.Linear(
+                args.implicit_dim,
+                args.cat_implicit_dim,
+                bias=False,
+            )
+        if self.uses_cicpr2_cross_modal_attention():
+            self.cicpr2_attention_image_query = nn.Linear(
+                args.implicit_dim,
+                args.attr_present_dim,
+                bias=False,
+            )
+            self.cicpr2_attention_category_key = nn.Linear(
+                args.attr_present_dim,
+                args.attr_present_dim,
+                bias=False,
+            )
+        if self.uses_cicpr2_score_distillation():
+            score_hidden_dim = max(8, args.cat_implicit_dim // 4)
+            self.cicpr2_score_head = nn.Sequential(
+                nn.Linear(args.cat_implicit_dim, score_hidden_dim),
+                nn.LeakyReLU(),
+                nn.Linear(score_hidden_dim, 1),
+            )
         gen_input_dim = args.attr_present_dim + args.implicit_dim + self.category_conf_extra_dim()
         self.gen_layer1 = nn.Linear(gen_input_dim, args.cat_implicit_dim)
         self.gen_layer2 = nn.Linear(args.attr_present_dim, args.attr_present_dim)
@@ -1357,7 +1530,7 @@ class CCFCRec(nn.Module):
         return self.method_variant in M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
 
     def uses_cicp_features(self):
-        return self.method_variant in CICPR1_METHOD_VARIANTS
+        return self.method_variant in CICP_METHOD_VARIANTS
 
     def uses_cicpr1_e4_residual(self):
         return self.method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS
@@ -1370,6 +1543,21 @@ class CCFCRec(nn.Module):
 
     def uses_cicpr1_adaptive_attention(self):
         return self.method_variant in CICPR1_ADAPTIVE_ATTENTION_METHOD_VARIANTS
+
+    def uses_cicpr2_content_direction_residual(self):
+        return self.method_variant in CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS
+
+    def uses_cicpr2_category_increment(self):
+        return self.method_variant in CICPR2_CATEGORY_INCREMENT_METHOD_VARIANTS
+
+    def uses_cicpr2_cross_modal_attention(self):
+        return self.method_variant in CICPR2_CROSS_MODAL_ATTENTION_METHOD_VARIANTS
+
+    def uses_cicpr2_score_distillation(self):
+        return self.method_variant in CICPR2_SCORE_DISTILLATION_METHOD_VARIANTS
+
+    def uses_cicpr2_reliability_dropout(self):
+        return self.method_variant in CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS
 
     def category_conf_extra_dim(self):
         if self.uses_category_confidence():
@@ -1425,6 +1613,17 @@ class CCFCRec(nn.Module):
             nn.init.xavier_normal_(self.cicp_category_expert.weight)
             nn.init.zeros_(self.cicp_category_expert_gate.weight)
             nn.init.constant_(self.cicp_category_expert_gate.bias, -2.0)
+        if self.uses_cicpr2_content_direction_residual():
+            nn.init.zeros_(self.cicpr2_residual_category_direction.weight)
+            nn.init.zeros_(self.cicpr2_residual_image_direction.weight)
+        if self.uses_cicpr2_cross_modal_attention():
+            nn.init.xavier_normal_(self.cicpr2_attention_image_query.weight)
+            nn.init.xavier_normal_(self.cicpr2_attention_category_key.weight)
+        if self.uses_cicpr2_score_distillation():
+            nn.init.xavier_normal_(self.cicpr2_score_head[0].weight)
+            nn.init.zeros_(self.cicpr2_score_head[0].bias)
+            nn.init.xavier_normal_(self.cicpr2_score_head[2].weight)
+            nn.init.zeros_(self.cicpr2_score_head[2].bias)
 
     def build_category_conf_bins(self, attribute):
         category_count = (attribute != -1).sum(dim=1)
@@ -1502,6 +1701,36 @@ class CCFCRec(nn.Module):
         attr_attention_weight = torch.softmax(z_v_mask, dim=1)
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
+        if self.uses_cicpr2_cross_modal_attention():
+            image_query = F.normalize(
+                self.cicpr2_attention_image_query(p_v),
+                dim=1,
+                eps=1e-6,
+            )
+            category_key = F.normalize(
+                self.cicpr2_attention_category_key(self.attr_matrix),
+                dim=1,
+                eps=1e-6,
+            )
+            content_logits = torch.matmul(image_query, category_key.t()) / (
+                self.cicpr2_cross_attention_temperature
+            )
+            content_logits = torch.where(attribute != -1, content_logits, neg_inf)
+            content_attention = torch.softmax(content_logits, dim=1)
+            content_attr_emb = torch.matmul(content_attention, self.attr_matrix)
+            score_gate = (
+                self.cicpr2_cross_attention_strength
+                * cicp[:, :1].clamp(0.0, 1.0)
+            )
+            final_attr_emb = (
+                (1.0 - score_gate) * final_attr_emb
+                + score_gate * content_attr_emb
+            )
+        if self.uses_cicpr2_reliability_dropout() and self.training:
+            score = cicp[:, :1].clamp(0.0, 1.0)
+            keep_probability = 1.0 - self.cicpr2_category_dropout_max * (1.0 - score)
+            keep_mask = torch.bernoulli(keep_probability)
+            final_attr_emb = final_attr_emb * keep_mask / keep_probability.clamp_min(1e-6)
         if self.uses_cicpr1_modality_routing():
             delta = self.cicp_modality_strength * torch.tanh(self.cicp_modality_gate(cicp))
             final_attr_emb = final_attr_emb * (1.0 + delta)
@@ -1515,6 +1744,14 @@ class CCFCRec(nn.Module):
             p_v = p_v * (1.0 + self.m11r4_fusion_strength * image_scale)
         q_v_a = self.build_generator_input(final_attr_emb, p_v, attribute)
         hidden = self.gen_layer1(q_v_a)
+        if self.uses_cicpr2_category_increment():
+            image_only_input = torch.cat((torch.zeros_like(final_attr_emb), p_v), dim=1)
+            image_hidden = self.gen_layer1(image_only_input)
+            category_increment = hidden - image_hidden
+            score_gate = 1.0 + self.cicpr2_increment_strength * (
+                2.0 * cicp[:, :1].clamp(0.0, 1.0) - 1.0
+            )
+            hidden = image_hidden + score_gate * category_increment
         if self.uses_cicpr1_e4_residual():
             cicp_residual = self.cicp_feature_to_hidden(
                 self.h(self.cicp_feature_projection(cicp))
@@ -1523,6 +1760,19 @@ class CCFCRec(nn.Module):
                 cicp_residual,
                 hidden,
                 self.cicp_residual_max_ratio,
+            )
+            self._last_cicp_residual = cicp_residual
+            hidden = hidden + cicp_residual
+        elif self.uses_cicpr2_content_direction_residual():
+            content_direction = torch.tanh(
+                self.cicpr2_residual_category_direction(final_attr_emb)
+                + self.cicpr2_residual_image_direction(p_v)
+            )
+            cicp_residual = cicp[:, :1].clamp(0.0, 1.0) * content_direction
+            cicp_residual = cap_cicp_residual_norm(
+                cicp_residual,
+                hidden,
+                self.cicpr2_residual_max_ratio,
             )
             self._last_cicp_residual = cicp_residual
             hidden = hidden + cicp_residual
@@ -1589,6 +1839,11 @@ class CCFCRec(nn.Module):
                 hidden = hidden + feature_hidden
         q_v_c = self.gen_layer2(self.h(hidden))
         return q_v_c, final_attr_emb, p_v
+
+    def predict_cicpr2_score(self, generated_embedding):
+        if not self.uses_cicpr2_score_distillation():
+            raise ValueError("CICP-R2 score head is only available for score distillation")
+        return torch.sigmoid(self.cicpr2_score_head(generated_embedding)).squeeze(dim=1)
 
     def forward(self, attribute, image_feature, batch_size, m11_features=None, cicp_features=None):
         q_v_c, _, _ = self.encode_content_components(
@@ -1726,6 +1981,36 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 m11_features=m11r2_batch_features,
                 cicp_features=cicpr1_batch_features,
             )
+            cicpr2_distillation_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPR2_SCORE_DISTILLATION_METHOD_VARIANTS
+            ):
+                predicted_cicp_score = model.predict_cicpr2_score(q_v_c)
+                cicpr2_distillation_sum = build_cicpr2_score_distillation_loss(
+                    predicted_cicp_score,
+                    cicpr1_batch_features,
+                ) * float(getattr(args, "cicpr2_distillation_weight", 0.05))
+            cicpr2_ordinal_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPR2_ORDINAL_COUNTERFACTUAL_METHOD_VARIANTS
+                and item_genres.shape[0] > 1
+            ):
+                shuffled_item_genres = torch.roll(item_genres, shifts=1, dims=0)
+                shuffled_q_v_c = model(
+                    shuffled_item_genres,
+                    item_img_feature,
+                    user.shape[0],
+                    cicp_features=cicpr1_batch_features,
+                )
+                cicpr2_ordinal_sum = build_cicpr2_ordinal_counterfactual_loss(
+                    q_v_c,
+                    shuffled_q_v_c,
+                    model.item_embedding[item],
+                    cicpr1_batch_features,
+                    args,
+                ) * float(getattr(args, "cicpr2_ordinal_weight", 0.05))
             cicpr1_alignment_sum = q_v_c.new_tensor(0.0)
             if getattr(args, "method_variant", "baseline") in CICPR1_ALIGNMENT_METHOD_VARIANTS:
                 cicpr1_alignment_sum = build_cicpr1_alignment_loss(
@@ -1897,6 +2182,8 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 + m11r4_relational_alignment_sum
                 + cicpr1_alignment_sum
                 + cicpr1_counterfactual_sum
+                + cicpr2_distillation_sum
+                + cicpr2_ordinal_sum
             )
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)

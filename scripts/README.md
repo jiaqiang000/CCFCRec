@@ -32,6 +32,8 @@
 | `watch_m11r4_four_performance_first_logs.sh` | 读取最新 M11-R4 四分支结果目录并显示状态与日志尾部。 | 配合 M11-R4 最终 launcher（封装启动脚本）查看 `status.tsv`、`master.log` 和四个分支日志 |
 | `run_cicpr1_six_access_methods_seed43_fast_uniform_mps_100epoch.sh` | CICP-R1（类别增量协同可预测性第一轮）六机制统一 launcher（封装启动脚本）；正式运行强制 MPS（苹果图形处理器）、fast_uniform（快速均匀负采样）和100epoch（100训练轮次）。 | 唯一E4式残差、模态路由、类别专家混合、协同对齐课程、类别反事实间隔、自适应类别注意力；seed43，workers8，每分支100epoch |
 | `watch_cicpr1_six_access_methods_logs.sh` | 读取最新 CICP-R1（类别增量协同可预测性第一轮）六分支结果并显示状态、完成数和最新训练轮次。 | 默认输出一次快照；使用 `--follow` 时每30秒持续刷新 |
+| `run_cicpr2_six_embedding_generation_seed43_fast_uniform_mps_100epoch.sh` | CICP-R2（类别增量协同可预测性第二轮）六种嵌入生成机制统一 launcher（封装启动脚本）；强制冻结 seed43、workers8、batch1024、fast_uniform、MPS 和100epoch。 | `CICP-R2-E1-CDR` 至 `CICP-R2-E6-RCD`；仅 `CICP-R2-E1-CDR` 使用 E4 式隐藏残差，其余为类别增量分解、跨模态注意力、分数蒸馏、序关系反事实监督和可靠性条件类别丢弃 |
+| `watch_cicpr2_six_embedding_generation_logs.sh` | 读取最新 CICP-R2 六分支结果并按完整轮次前缀显示状态、完成数和最新训练轮次。 | 默认输出一次快照；使用 `--follow` 时每30秒持续刷新 |
 | `run_task4_full_100epoch_mps.sh` | 兼容旧命令的 wrapper（封装转发脚本）。 | 转发到上面的 Task4 实验专用 launcher |
 
 实验专用 launcher 应在结果目录写入 `launcher_manifest.env`，至少记录：
