@@ -151,6 +151,20 @@ def build_model_args(state_dict: dict, config: dict[str, Any]) -> SimpleNamespac
         cicp_modality_strength=float(config.get("cicp_modality_strength", 0.25)),
         cicp_expert_strength=float(config.get("cicp_expert_strength", 0.20)),
         cicp_attention_strength=float(config.get("cicp_attention_strength", 0.50)),
+        cicpr2_residual_max_ratio=float(config.get("cicpr2_residual_max_ratio", 0.15)),
+        cicpr2_increment_strength=float(config.get("cicpr2_increment_strength", 0.50)),
+        cicpr2_cross_attention_strength=float(
+            config.get("cicpr2_cross_attention_strength", 0.50)
+        ),
+        cicpr2_cross_attention_temperature=float(
+            config.get("cicpr2_cross_attention_temperature", 0.25)
+        ),
+        cicpr2_distillation_weight=float(config.get("cicpr2_distillation_weight", 0.05)),
+        cicpr2_ordinal_weight=float(config.get("cicpr2_ordinal_weight", 0.05)),
+        cicpr2_ordinal_margin=float(config.get("cicpr2_ordinal_margin", 0.02)),
+        cicpr2_category_dropout_max=float(
+            config.get("cicpr2_category_dropout_max", 0.50)
+        ),
     )
 
 
@@ -258,7 +272,7 @@ def evaluate_validation_items(
     if str(amazon_code_dir) not in sys.path:
         sys.path.insert(0, str(amazon_code_dir))
     from cicp_features import load_cicp_feature_tensor
-    from model import CICPR1_METHOD_VARIANTS
+    from model import CICP_METHOD_VARIANTS
     from support import build_item_feature_tensors
 
     items, targets = _validation_targets(validate_csv, save_dict["user_ser_dict"])
@@ -273,7 +287,7 @@ def evaluate_validation_items(
     profile_by_item = profile.set_index("raw_asin")
     method_variant = str(config.get("method_variant", "baseline"))
     cicp_features = None
-    if method_variant in CICPR1_METHOD_VARIANTS:
+    if method_variant in CICP_METHOD_VARIANTS:
         cicp_features = load_cicp_feature_tensor(
             profile_csv,
             item_map,
