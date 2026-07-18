@@ -4,6 +4,7 @@ import sys
 import pickle
 import random
 import functools
+import hashlib
 import json
 import torch
 import torch.utils.data
@@ -26,6 +27,17 @@ from m11_features import (
     load_m11_feature_tensor,
 )
 from cicp_features import CICP_FEATURE_WIDTH, load_cicp_feature_tensor
+from cicp_mp_features import (
+    CICP_MP_ATTRIBUTION_ENTROPY_INDEX,
+    CICP_MP_DIRECTION_START,
+    CICP_MP_DISAGREEMENT_INDEX,
+    CICP_MP_FEATURE_WIDTH,
+    CICP_MP_POSITIVE_SHARE_INDEX,
+    CICP_MP_SCALAR_WIDTH,
+    CICP_MP_SEMANTIC_INCREMENT_INDEX,
+    CICP_MP_UNCERTAINTY_INDEX,
+    load_cicp_mp_feature_tensor,
+)
 
 
 def resolve_device():
@@ -108,6 +120,24 @@ CICPR2_METHOD_VARIANTS = (
     | CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS
 )
 CICP_METHOD_VARIANTS = CICPR1_METHOD_VARIANTS | CICPR2_METHOD_VARIANTS
+CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS = {"cicpmp_r1_reliable_residual"}
+CICPMP_R1_DIRECTION_ALIGNMENT_METHOD_VARIANTS = {"cicpmp_r1_direction_alignment"}
+CICPMP_R1_ATTENTION_ENTROPY_METHOD_VARIANTS = {"cicpmp_r1_attention_entropy"}
+CICPMP_R1_RELIABLE_EXPERT_METHOD_VARIANTS = {"cicpmp_r1_reliable_expert"}
+CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS = {
+    "cicpmp_r1_counterfactual_calibration"
+}
+CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS = {
+    "cicpmp_r1_direction_hard_negative"
+}
+CICPMP_R1_METHOD_VARIANTS = (
+    CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS
+    | CICPMP_R1_DIRECTION_ALIGNMENT_METHOD_VARIANTS
+    | CICPMP_R1_ATTENTION_ENTROPY_METHOD_VARIANTS
+    | CICPMP_R1_RELIABLE_EXPERT_METHOD_VARIANTS
+    | CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS
+    | CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS
+)
 M11R4_FEATURE_METHOD_VARIANTS = (
     M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
     | M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
@@ -260,6 +290,10 @@ def uses_m11r2_feature_fusion(args):
 
 def uses_cicp_features(args):
     return getattr(args, "method_variant", "baseline") in CICP_METHOD_VARIANTS
+
+
+def uses_cicp_mp_features(args):
+    return getattr(args, "method_variant", "baseline") in CICPMP_R1_METHOD_VARIANTS
 
 
 def resolve_m11_feature_mode(args):
@@ -719,6 +753,158 @@ def build_cicpr2_ordinal_counterfactual_loss(
     return normalized * real_embedding.shape[0]
 
 
+def require_cicp_mp_features(features, batch_size, context):
+    if features is None or features.ndim != 2 or features.shape != (
+        batch_size,
+        CICP_MP_FEATURE_WIDTH,
+    ):
+        shape = None if features is None else tuple(features.shape)
+        raise ValueError(
+            f"{context} requires CICP-MP features with shape "
+            f"[batch,{CICP_MP_FEATURE_WIDTH}], got {shape}"
+        )
+
+
+def build_cicpmp_reliability(features, args):
+    require_cicp_mp_features(features, features.shape[0], "CICP-MP reliability")
+    scale = float(getattr(args, "cicpmp_reliability_scale", 50.0))
+    if scale <= 0:
+        raise ValueError("cicpmp_reliability_scale must be positive")
+    uncertainty = features[:, CICP_MP_UNCERTAINTY_INDEX].detach().clamp_min(0.0)
+    disagreement = features[:, CICP_MP_DISAGREEMENT_INDEX].detach().clamp_min(0.0)
+    return torch.exp(-scale * (uncertainty + disagreement)).clamp(0.05, 1.0)
+
+
+def build_cicpmp_direction_alignment_loss(predicted_direction, features, args):
+    if predicted_direction is None:
+        return features.new_tensor(0.0)
+    require_cicp_mp_features(
+        features,
+        predicted_direction.shape[0],
+        "CICP-MP direction alignment",
+    )
+    target = features[:, CICP_MP_DIRECTION_START:].detach().to(
+        dtype=predicted_direction.dtype
+    )
+    target_norm = target.norm(dim=1)
+    valid = target_norm > 1e-8
+    if not bool(valid.any()):
+        return predicted_direction.new_tensor(0.0)
+    cosine = F.cosine_similarity(
+        predicted_direction[valid],
+        target[valid],
+        dim=1,
+        eps=1e-6,
+    )
+    reliability = build_cicpmp_reliability(features, args)[valid].to(cosine.dtype)
+    return (reliability * (1.0 - cosine)).sum()
+
+
+def build_cicpmp_attention_entropy_loss(attention, attribute, features, args):
+    if attention is None:
+        return features.new_tensor(0.0)
+    require_cicp_mp_features(
+        features,
+        attention.shape[0],
+        "CICP-MP attention entropy calibration",
+    )
+    if attribute.shape != attention.shape:
+        raise ValueError("CICP-MP attention and attribute masks must have the same shape")
+    valid_mask = attribute.ne(-1)
+    valid_count = valid_mask.sum(dim=1)
+    eligible = valid_count > 1
+    if not bool(eligible.any()):
+        return attention.new_tensor(0.0)
+    safe_attention = attention.clamp_min(1e-12)
+    entropy = -(safe_attention * safe_attention.log() * valid_mask).sum(dim=1)
+    normalized_entropy = entropy / valid_count.clamp_min(2).to(entropy.dtype).log()
+    target = features[:, CICP_MP_ATTRIBUTION_ENTROPY_INDEX].detach().to(
+        normalized_entropy.dtype
+    ).clamp(0.0, 1.0)
+    positive_share = features[:, CICP_MP_POSITIVE_SHARE_INDEX].detach().to(
+        normalized_entropy.dtype
+    ).clamp(0.0, 1.0)
+    reliability = build_cicpmp_reliability(features, args).to(normalized_entropy.dtype)
+    per_item = F.smooth_l1_loss(normalized_entropy, target, reduction="none")
+    weights = reliability * positive_share * eligible.to(normalized_entropy.dtype)
+    return (weights * per_item).sum()
+
+
+def build_cicpmp_counterfactual_loss(
+    real_embedding,
+    shuffled_embedding,
+    item_embedding,
+    features,
+    args,
+):
+    if real_embedding is None or shuffled_embedding is None or item_embedding is None:
+        reference = real_embedding if real_embedding is not None else shuffled_embedding
+        if reference is None:
+            return torch.tensor(0.0)
+        return reference.new_tensor(0.0)
+    if real_embedding.ndim != 2 or shuffled_embedding.shape != real_embedding.shape:
+        raise ValueError("CICP-MP counterfactual embeddings must have the same 2D shape")
+    if item_embedding.shape != real_embedding.shape:
+        raise ValueError("CICP-MP item teacher must match generated embedding shape")
+    require_cicp_mp_features(
+        features,
+        real_embedding.shape[0],
+        "CICP-MP calibrated counterfactual",
+    )
+    teacher = item_embedding.detach()
+    real_similarity = F.cosine_similarity(real_embedding, teacher, dim=1, eps=1e-6)
+    shuffled_similarity = F.cosine_similarity(
+        shuffled_embedding,
+        teacher,
+        dim=1,
+        eps=1e-6,
+    )
+    observed_increment = real_similarity - shuffled_similarity
+    target_increment = features[:, CICP_MP_SEMANTIC_INCREMENT_INDEX].detach().to(
+        observed_increment.dtype
+    ).clamp(-0.10, 0.10)
+    reliability = build_cicpmp_reliability(features, args).to(observed_increment.dtype)
+    per_item = F.smooth_l1_loss(
+        observed_increment,
+        target_increment,
+        reduction="none",
+    )
+    return (reliability * per_item).sum()
+
+
+def build_cicpmp_hard_negative_weights(anchor_features, negative_features, args):
+    require_cicp_mp_features(
+        anchor_features,
+        anchor_features.shape[0],
+        "CICP-MP hard-negative anchors",
+    )
+    if negative_features.ndim != 4 or negative_features.shape[-1] != CICP_MP_FEATURE_WIDTH:
+        raise ValueError(
+            "CICP-MP hard-negative features must have shape "
+            f"[batch,positive,negative,{CICP_MP_FEATURE_WIDTH}]"
+        )
+    if negative_features.shape[0] != anchor_features.shape[0]:
+        raise ValueError("CICP-MP anchor and negative feature batches must match")
+    strength = float(getattr(args, "cicpmp_hard_negative_strength", 0.50))
+    if strength <= 0 or strength > 1:
+        raise ValueError("cicpmp_hard_negative_strength must be in (0, 1]")
+    anchor_direction = F.normalize(
+        anchor_features[:, CICP_MP_DIRECTION_START:].detach(),
+        dim=1,
+        eps=1e-6,
+    )
+    negative_direction = F.normalize(
+        negative_features[..., CICP_MP_DIRECTION_START:].detach(),
+        dim=-1,
+        eps=1e-6,
+    )
+    cosine = (negative_direction * anchor_direction[:, None, None, :]).sum(dim=-1)
+    similarity = (1.0 + cosine).mul(0.5).clamp(0.0, 1.0)
+    reliability = build_cicpmp_reliability(anchor_features, args).to(similarity.dtype)
+    weights = 1.0 + strength * reliability[:, None, None] * similarity
+    return weights / weights.mean(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
 def build_task4_pair_margin_targets_from_profile(profile, item_serialize_dict, args, item_number=None):
     if not uses_task4_pair_margin(args):
         return None
@@ -941,6 +1127,20 @@ def load_cicpr1_feature_tensor(item_serialize_dict, args, item_number=None):
     if not profile_path:
         raise ValueError("cicp_profile_path is required for CICP variants")
     return load_cicp_feature_tensor(
+        profile_path,
+        item_serialize_dict,
+        item_number=item_number,
+        reject_evaluation_columns=True,
+    )
+
+
+def load_cicpmp_feature_tensor(item_serialize_dict, args, item_number=None):
+    if not uses_cicp_mp_features(args):
+        return None
+    profile_path = getattr(args, "cicp_mp_profile_path", "")
+    if not str(profile_path).strip():
+        raise ValueError("cicp_mp_profile_path is required for CICP-MP variants")
+    return load_cicp_mp_feature_tensor(
         profile_path,
         item_serialize_dict,
         item_number=item_number,
@@ -1194,6 +1394,34 @@ def validate_method_args(args):
         dropout = float(getattr(args, "cicpr2_category_dropout_max", 0.50))
         if dropout <= 0 or dropout >= 1:
             raise ValueError("cicpr2_category_dropout_max must be in (0, 1)")
+    if method_variant in CICPMP_R1_METHOD_VARIANTS:
+        if not str(getattr(args, "cicp_mp_profile_path", "")).strip():
+            raise ValueError("cicp_mp_profile_path is required for CICP-MP variants")
+        if float(getattr(args, "cicpmp_reliability_scale", 50.0)) <= 0:
+            raise ValueError("cicpmp_reliability_scale must be positive")
+    if method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS:
+        if int(getattr(args, "cicpmp_hidden_dim", 32)) <= 0:
+            raise ValueError("cicpmp_hidden_dim must be positive")
+        ratio = float(getattr(args, "cicpmp_residual_max_ratio", 0.15))
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("cicpmp_residual_max_ratio must be in (0, 1]")
+    if method_variant in CICPMP_R1_DIRECTION_ALIGNMENT_METHOD_VARIANTS:
+        if float(getattr(args, "cicpmp_direction_weight", 0.05)) <= 0:
+            raise ValueError("cicpmp_direction_weight must be positive")
+    if method_variant in CICPMP_R1_ATTENTION_ENTROPY_METHOD_VARIANTS:
+        if float(getattr(args, "cicpmp_entropy_weight", 0.02)) <= 0:
+            raise ValueError("cicpmp_entropy_weight must be positive")
+    if method_variant in CICPMP_R1_RELIABLE_EXPERT_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicpmp_expert_strength", 0.20))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicpmp_expert_strength must be in (0, 1]")
+    if method_variant in CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS:
+        if float(getattr(args, "cicpmp_counterfactual_weight", 0.05)) <= 0:
+            raise ValueError("cicpmp_counterfactual_weight must be positive")
+    if method_variant in CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS:
+        strength = float(getattr(args, "cicpmp_hard_negative_strength", 0.50))
+        if strength <= 0 or strength > 1:
+            raise ValueError("cicpmp_hard_negative_strength must be in (0, 1]")
 
 
 def scalar_text(value):
@@ -1202,6 +1430,53 @@ def scalar_text(value):
     if hasattr(value, "item"):
         value = value.item()
     return str(value)
+
+
+CCFCREC_COMMON_PARAMETER_NAMES = (
+    "attr_matrix",
+    "attr_W1",
+    "attr_b1",
+    "attr_W2",
+    "image_projection",
+    "user_embedding",
+    "item_embedding",
+    "gen_layer1.weight",
+    "gen_layer1.bias",
+    "gen_layer2.weight",
+    "gen_layer2.bias",
+)
+
+
+def ccfcrec_common_parameter_sha256(model):
+    parameters = dict(model.named_parameters())
+    missing = [name for name in CCFCREC_COMMON_PARAMETER_NAMES if name not in parameters]
+    if missing:
+        raise ValueError(f"CCFCRec common parameter hash is missing parameters: {missing}")
+    digest = hashlib.sha256()
+    for name in CCFCREC_COMMON_PARAMETER_NAMES:
+        value = parameters[name].detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+        digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def parameter_count_by_ownership(model):
+    common_names = set(CCFCREC_COMMON_PARAMETER_NAMES)
+    common = 0
+    method_specific = 0
+    for name, parameter in model.named_parameters():
+        count = int(parameter.numel())
+        if name in common_names:
+            common += count
+        else:
+            method_specific += count
+    return {
+        "common": common,
+        "method_specific": method_specific,
+        "total": common + method_specific,
+    }
 
 
 def training_result_header():
@@ -1288,6 +1563,38 @@ def build_run_config(args, model):
             method_variant in CICPR2_CONTENT_DIRECTION_RESIDUAL_METHOD_VARIANTS
         ),
         "cicpr2_independent_signal_width": 1 if method_variant in CICPR2_METHOD_VARIANTS else 0,
+        "cicp_mp_profile_path": str(getattr(args, "cicp_mp_profile_path", "")),
+        "cicp_mp_feature_input_width": int(
+            CICP_MP_FEATURE_WIDTH if uses_cicp_mp_features(args) else 0
+        ),
+        "cicp_mp_scalar_width": int(
+            CICP_MP_SCALAR_WIDTH if uses_cicp_mp_features(args) else 0
+        ),
+        "cicpmp_hidden_dim": int(getattr(args, "cicpmp_hidden_dim", 0)),
+        "cicpmp_residual_max_ratio": float(
+            getattr(args, "cicpmp_residual_max_ratio", 0.0)
+        ),
+        "cicpmp_reliability_scale": float(
+            getattr(args, "cicpmp_reliability_scale", 0.0)
+        ),
+        "cicpmp_direction_weight": float(
+            getattr(args, "cicpmp_direction_weight", 0.0)
+        ),
+        "cicpmp_entropy_weight": float(getattr(args, "cicpmp_entropy_weight", 0.0)),
+        "cicpmp_expert_strength": float(
+            getattr(args, "cicpmp_expert_strength", 0.0)
+        ),
+        "cicpmp_counterfactual_weight": float(
+            getattr(args, "cicpmp_counterfactual_weight", 0.0)
+        ),
+        "cicpmp_hard_negative_strength": float(
+            getattr(args, "cicpmp_hard_negative_strength", 0.0)
+        ),
+        "cicpmp_e4_style_residual_is_unique": (
+            method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS
+        ),
+        "ccfcrec_common_parameter_sha256": ccfcrec_common_parameter_sha256(model),
+        "parameter_count": parameter_count_by_ownership(model),
         "training_input_uses_validation_item_metrics": False,
         "training_input_uses_test_item_metrics": False,
         "seed": int(getattr(args, "seed", -1)),
@@ -1371,8 +1678,17 @@ class CCFCRec(nn.Module):
         self.cicpr2_category_dropout_max = float(
             getattr(args, "cicpr2_category_dropout_max", 0.50)
         )
+        self.cicpmp_hidden_dim = int(getattr(args, "cicpmp_hidden_dim", 32))
+        self.cicpmp_residual_max_ratio = float(
+            getattr(args, "cicpmp_residual_max_ratio", 0.15)
+        )
+        self.cicpmp_expert_strength = float(
+            getattr(args, "cicpmp_expert_strength", 0.20)
+        )
         self._last_m11_residual = None
         self._last_cicp_residual = None
+        self._last_cicpmp_residual = None
+        self._last_attr_attention_weight = None
         self.category_bin_count = 4
         if self.uses_category_confidence():
             if self.category_conf_dim <= 0:
@@ -1492,6 +1808,7 @@ class CCFCRec(nn.Module):
         self.gen_layer2 = nn.Linear(args.attr_present_dim, args.attr_present_dim)
         # 参数初始化
         self.__init_param__()
+        self.__init_cicpmp_modules__()
 
     def uses_category_confidence(self):
         return self.method_variant in {"category_conf_input", "category_conf_fusion_gate"}
@@ -1559,6 +1876,27 @@ class CCFCRec(nn.Module):
     def uses_cicpr2_reliability_dropout(self):
         return self.method_variant in CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS
 
+    def uses_cicp_mp_features(self):
+        return self.method_variant in CICPMP_R1_METHOD_VARIANTS
+
+    def uses_cicpmp_reliable_residual(self):
+        return self.method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS
+
+    def uses_cicpmp_direction_alignment(self):
+        return self.method_variant in CICPMP_R1_DIRECTION_ALIGNMENT_METHOD_VARIANTS
+
+    def uses_cicpmp_attention_entropy(self):
+        return self.method_variant in CICPMP_R1_ATTENTION_ENTROPY_METHOD_VARIANTS
+
+    def uses_cicpmp_reliable_expert(self):
+        return self.method_variant in CICPMP_R1_RELIABLE_EXPERT_METHOD_VARIANTS
+
+    def uses_cicpmp_counterfactual(self):
+        return self.method_variant in CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS
+
+    def uses_cicpmp_hard_negative(self):
+        return self.method_variant in CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS
+
     def category_conf_extra_dim(self):
         if self.uses_category_confidence():
             return self.category_conf_dim + 2
@@ -1625,6 +1963,61 @@ class CCFCRec(nn.Module):
             nn.init.xavier_normal_(self.cicpr2_score_head[2].weight)
             nn.init.zeros_(self.cicpr2_score_head[2].bias)
 
+    def __init_cicpmp_modules__(self):
+        if not self.uses_cicp_mp_features():
+            return
+        seed = int(getattr(self.args, "seed", 43))
+        seed_material = f"{seed}:{self.method_variant}:cicpmp_modules".encode("utf-8")
+        module_seed = int.from_bytes(
+            hashlib.sha256(seed_material).digest()[:8],
+            byteorder="big",
+        ) % (2**63 - 1)
+
+        # 新增模块的构造和初始化在独立随机流中完成，不能推进公共参数随机流。
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(module_seed)
+            if self.uses_cicpmp_reliable_residual():
+                self.cicpmp_input_norm = nn.LayerNorm(
+                    CICP_MP_FEATURE_WIDTH,
+                    elementwise_affine=False,
+                )
+                self.cicpmp_residual_projection = nn.Linear(
+                    CICP_MP_FEATURE_WIDTH,
+                    self.cicpmp_hidden_dim,
+                    bias=False,
+                )
+                self.cicpmp_residual_to_hidden = nn.Linear(
+                    self.cicpmp_hidden_dim,
+                    self.args.cat_implicit_dim,
+                    bias=False,
+                )
+                nn.init.xavier_normal_(self.cicpmp_residual_projection.weight)
+                nn.init.xavier_normal_(self.cicpmp_residual_to_hidden.weight)
+            elif self.uses_cicpmp_direction_alignment():
+                self.cicpmp_direction_head = nn.Linear(
+                    self.args.cat_implicit_dim,
+                    CICP_MP_FEATURE_WIDTH - CICP_MP_DIRECTION_START,
+                    bias=False,
+                )
+                nn.init.xavier_normal_(self.cicpmp_direction_head.weight)
+            elif self.uses_cicpmp_reliable_expert():
+                route_hidden = max(8, self.args.cat_implicit_dim // 16)
+                self.cicpmp_category_expert = nn.Linear(
+                    self.args.attr_present_dim,
+                    self.args.cat_implicit_dim,
+                    bias=False,
+                )
+                self.cicpmp_expert_gate = nn.Sequential(
+                    nn.Linear(CICP_MP_SCALAR_WIDTH, route_hidden),
+                    nn.LeakyReLU(),
+                    nn.Linear(route_hidden, 1),
+                )
+                nn.init.xavier_normal_(self.cicpmp_category_expert.weight)
+                nn.init.xavier_normal_(self.cicpmp_expert_gate[0].weight)
+                nn.init.zeros_(self.cicpmp_expert_gate[0].bias)
+                nn.init.zeros_(self.cicpmp_expert_gate[2].weight)
+                nn.init.constant_(self.cicpmp_expert_gate[2].bias, -2.2)
+
     def build_category_conf_bins(self, attribute):
         category_count = (attribute != -1).sum(dim=1)
         bins = torch.zeros_like(category_count, dtype=torch.long)
@@ -1667,9 +2060,12 @@ class CCFCRec(nn.Module):
         batch_size,
         m11_features=None,
         cicp_features=None,
+        cicp_mp_features=None,
     ):
         self._last_m11_residual = None
         self._last_cicp_residual = None
+        self._last_cicpmp_residual = None
+        self._last_attr_attention_weight = None
         features = None
         if self.uses_m11r2_feature_fusion():
             if m11_features is None:
@@ -1689,6 +2085,19 @@ class CCFCRec(nn.Module):
                     f"got {tuple(cicp_features.shape)}"
                 )
             cicp = cicp_features.to(dtype=self.attr_matrix.dtype)
+        cicp_mp = None
+        if self.uses_cicp_mp_features():
+            if cicp_mp_features is None:
+                raise ValueError(f"cicp_mp_features are required for {self.method_variant}")
+            if (
+                cicp_mp_features.ndim != 2
+                or cicp_mp_features.shape[1] != CICP_MP_FEATURE_WIDTH
+            ):
+                raise ValueError(
+                    "cicp_mp_features must have shape "
+                    f"[batch,{CICP_MP_FEATURE_WIDTH}], got {tuple(cicp_mp_features.shape)}"
+                )
+            cicp_mp = cicp_mp_features.to(dtype=self.attr_matrix.dtype)
         z_v = torch.matmul(torch.matmul(self.attr_matrix, self.attr_W1)+self.attr_b1.squeeze(), self.attr_W2)
         z_v_copy = z_v.repeat(batch_size, 1, 1)
         z_v_squeeze = z_v_copy.squeeze(dim=2)
@@ -1699,6 +2108,7 @@ class CCFCRec(nn.Module):
             attention_temperature = torch.exp(-self.cicp_attention_strength * centered_score)
             z_v_mask = z_v_mask / attention_temperature
         attr_attention_weight = torch.softmax(z_v_mask, dim=1)
+        self._last_attr_attention_weight = attr_attention_weight
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
         if self.uses_cicpr2_cross_modal_attention():
@@ -1784,6 +2194,36 @@ class CCFCRec(nn.Module):
                 * torch.sigmoid(self.cicp_category_expert_gate(cicp))
             )
             hidden = (1.0 - expert_gate) * hidden + expert_gate * expert_hidden
+        if self.uses_cicpmp_reliable_residual():
+            reliability = build_cicpmp_reliability(cicp_mp, self.args).to(hidden.dtype)
+            cicpmp_residual = self.cicpmp_residual_to_hidden(
+                self.h(
+                    self.cicpmp_residual_projection(
+                        self.cicpmp_input_norm(cicp_mp)
+                    )
+                )
+            )
+            cicpmp_residual = cicpmp_residual * reliability[:, None]
+            cicpmp_residual = cap_cicp_residual_norm(
+                cicpmp_residual,
+                hidden,
+                self.cicpmp_residual_max_ratio,
+            )
+            self._last_cicpmp_residual = cicpmp_residual
+            hidden = hidden + cicpmp_residual
+        elif self.uses_cicpmp_reliable_expert():
+            reliability = build_cicpmp_reliability(cicp_mp, self.args).to(hidden.dtype)
+            scalar_features = F.layer_norm(
+                cicp_mp[:, :CICP_MP_SCALAR_WIDTH],
+                (CICP_MP_SCALAR_WIDTH,),
+            )
+            expert_gate = (
+                self.cicpmp_expert_strength
+                * reliability[:, None]
+                * torch.sigmoid(self.cicpmp_expert_gate(scalar_features))
+            )
+            expert_hidden = self.cicpmp_category_expert(final_attr_emb)
+            hidden = (1.0 - expert_gate) * hidden + expert_gate * expert_hidden
         if self.uses_m11r2_feature_fusion():
             features = features.to(hidden.dtype)
             if self.uses_m11r3_film():
@@ -1845,13 +2285,29 @@ class CCFCRec(nn.Module):
             raise ValueError("CICP-R2 score head is only available for score distillation")
         return torch.sigmoid(self.cicpr2_score_head(generated_embedding)).squeeze(dim=1)
 
-    def forward(self, attribute, image_feature, batch_size, m11_features=None, cicp_features=None):
+    def predict_cicpmp_direction(self, generated_embedding):
+        if not self.uses_cicpmp_direction_alignment():
+            raise ValueError(
+                "CICP-MP direction head is only available for direction alignment"
+            )
+        return self.cicpmp_direction_head(generated_embedding)
+
+    def forward(
+        self,
+        attribute,
+        image_feature,
+        batch_size,
+        m11_features=None,
+        cicp_features=None,
+        cicp_mp_features=None,
+    ):
         q_v_c, _, _ = self.encode_content_components(
             attribute,
             image_feature,
             batch_size,
             m11_features=m11_features,
             cicp_features=cicp_features,
+            cicp_mp_features=cicp_mp_features,
         )
         return q_v_c
 
@@ -1903,6 +2359,16 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
     )
     if cicpr1_feature_tensor is not None:
         cicpr1_feature_tensor = cicpr1_feature_tensor.to(device, non_blocking=non_blocking)
+    cicpmp_feature_tensor = load_cicpmp_feature_tensor(
+        train_loader.dataset.item_serialize_dict,
+        args,
+        item_number=train_loader.dataset.item_number,
+    )
+    if cicpmp_feature_tensor is not None:
+        cicpmp_feature_tensor = cicpmp_feature_tensor.to(
+            device,
+            non_blocking=non_blocking,
+        )
     task4_pair_margin_targets = load_task4_pair_margin_targets(
         train_loader.dataset.item_serialize_dict,
         args,
@@ -1963,6 +2429,9 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             cicpr1_batch_features = (
                 cicpr1_feature_tensor[item] if cicpr1_feature_tensor is not None else None
             )
+            cicpmp_batch_features = (
+                cicpmp_feature_tensor[item] if cicpmp_feature_tensor is not None else None
+            )
             task4_batch_pair_margin_targets = (
                 {name: tensor[item] for name, tensor in task4_pair_margin_targets.items()}
                 if task4_pair_margin_targets is not None
@@ -1980,6 +2449,7 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 user.shape[0],
                 m11_features=m11r2_batch_features,
                 cicp_features=cicpr1_batch_features,
+                cicp_mp_features=cicpmp_batch_features,
             )
             cicpr2_distillation_sum = q_v_c.new_tensor(0.0)
             if (
@@ -2020,6 +2490,48 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                     i_epoch,
                     args,
                 ) * float(getattr(args, "cicp_alignment_weight", 0.05))
+            cicpmp_direction_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPMP_R1_DIRECTION_ALIGNMENT_METHOD_VARIANTS
+            ):
+                predicted_direction = model.predict_cicpmp_direction(q_v_c)
+                cicpmp_direction_sum = build_cicpmp_direction_alignment_loss(
+                    predicted_direction,
+                    cicpmp_batch_features,
+                    args,
+                ) * float(getattr(args, "cicpmp_direction_weight", 0.05))
+            cicpmp_entropy_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPMP_R1_ATTENTION_ENTROPY_METHOD_VARIANTS
+            ):
+                cicpmp_entropy_sum = build_cicpmp_attention_entropy_loss(
+                    model._last_attr_attention_weight,
+                    item_genres,
+                    cicpmp_batch_features,
+                    args,
+                ) * float(getattr(args, "cicpmp_entropy_weight", 0.02))
+            cicpmp_counterfactual_sum = q_v_c.new_tensor(0.0)
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS
+                and item_genres.shape[0] > 1
+            ):
+                shuffled_item_genres = torch.roll(item_genres, shifts=1, dims=0)
+                shuffled_q_v_c = model(
+                    shuffled_item_genres,
+                    item_img_feature,
+                    user.shape[0],
+                    cicp_mp_features=cicpmp_batch_features,
+                )
+                cicpmp_counterfactual_sum = build_cicpmp_counterfactual_loss(
+                    q_v_c,
+                    shuffled_q_v_c,
+                    model.item_embedding[item],
+                    cicpmp_batch_features,
+                    args,
+                ) * float(getattr(args, "cicpmp_counterfactual_weight", 0.05))
             m11r3_neighbor_transfer_sum = q_v_c.new_tensor(0.0)
             if getattr(args, "method_variant", "baseline") in M11R3_NEIGHBOR_TRANSFER_METHOD_VARIANTS:
                 m11r3_neighbor_transfer_sum = build_m11r3_neighbor_transfer_loss(
@@ -2045,7 +2557,24 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
             neg_contrast_mul = torch.sum(torch.mul(q_v_c_un2squeeze, neg_item_emb), dim=3) / (
                     args.tau * torch.norm(q_v_c_un2squeeze, dim=3) * torch.norm(neg_item_emb, dim=3))
             neg_contrast_exp = torch.exp(neg_contrast_mul)
-            neg_contrast_sum = torch.sum(neg_contrast_exp, dim=2)  # shape = [1024, 10]
+            cicpmp_negative_weights = None
+            if (
+                getattr(args, "method_variant", "baseline")
+                in CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS
+            ):
+                cicpmp_negative_features = cicpmp_feature_tensor[negative_item_list]
+                cicpmp_negative_weights = build_cicpmp_hard_negative_weights(
+                    cicpmp_batch_features,
+                    cicpmp_negative_features,
+                    args,
+                )
+            if cicpmp_negative_weights is not None:
+                neg_contrast_sum = torch.sum(
+                    neg_contrast_exp * cicpmp_negative_weights,
+                    dim=2,
+                )
+            else:
+                neg_contrast_sum = torch.sum(neg_contrast_exp, dim=2)  # shape = [1024, 10]
             contrast_val = -torch.log(pos_contrast_exp / (pos_contrast_exp + neg_contrast_sum))  # shape = [1024*10]
             contrast_examples_num = contrast_val.shape[0] * contrast_val.shape[1]
             contrast_per_item = torch.sum(contrast_val, dim=1) / contrast_val.shape[1]
@@ -2184,6 +2713,9 @@ def train(model, train_loader, optimizer, valida, args, model_save_dir):
                 + cicpr1_counterfactual_sum
                 + cicpr2_distillation_sum
                 + cicpr2_ordinal_sum
+                + cicpmp_direction_sum
+                + cicpmp_entropy_sum
+                + cicpmp_counterfactual_sum
             )
             if math.isnan(total_loss):
                 print("loss is nan!, exit.", total_loss)
@@ -2289,5 +2821,8 @@ if __name__ == '__main__':
         cicp_profile_path=args.cicp_profile_path,
         use_cicp_features=uses_cicp_features(args),
         reject_cicp_evaluation_columns=True,
+        cicp_mp_profile_path=args.cicp_mp_profile_path,
+        use_cicp_mp_features=uses_cicp_mp_features(args),
+        reject_cicp_mp_evaluation_columns=True,
     )
     train(myModel, train_loader, optimizer, validator, args, save_dir)

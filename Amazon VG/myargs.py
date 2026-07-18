@@ -85,6 +85,12 @@ def get_args():
             'cicpr2_score_distillation',
             'cicpr2_ordinal_counterfactual',
             'cicpr2_reliability_dropout',
+            'cicpmp_r1_reliable_residual',
+            'cicpmp_r1_direction_alignment',
+            'cicpmp_r1_attention_entropy',
+            'cicpmp_r1_reliable_expert',
+            'cicpmp_r1_counterfactual_calibration',
+            'cicpmp_r1_direction_hard_negative',
         ],
         help='training method variant',
     )
@@ -142,6 +148,15 @@ def get_args():
     parser.add_argument('--cicpr2_ordinal_weight', type=float, default=0.05, help='CICP counterfactual ordinal auxiliary-loss weight')
     parser.add_argument('--cicpr2_ordinal_margin', type=float, default=0.02, help='category-increment ordering margin for CICP-R2')
     parser.add_argument('--cicpr2_category_dropout_max', type=float, default=0.50, help='maximum whole-category dropout probability at CICP score zero')
+    parser.add_argument('--cicp_mp_profile_path', type=str, default='', help='frozen train/validation CICP-MP-v1 23D profile CSV')
+    parser.add_argument('--cicpmp_hidden_dim', type=int, default=32, help='hidden width for the sole CICP-MP E4-style residual adapter')
+    parser.add_argument('--cicpmp_residual_max_ratio', type=float, default=0.15, help='maximum CICP-MP residual norm relative to baseline hidden norm')
+    parser.add_argument('--cicpmp_reliability_scale', type=float, default=50.0, help='fixed uncertainty/disagreement scale from the offline calibration audit')
+    parser.add_argument('--cicpmp_direction_weight', type=float, default=0.05, help='CICP-MP collaborative direction alignment loss weight')
+    parser.add_argument('--cicpmp_entropy_weight', type=float, default=0.02, help='CICP-MP category-attribution entropy calibration loss weight')
+    parser.add_argument('--cicpmp_expert_strength', type=float, default=0.20, help='maximum CICP-MP category expert mixture share')
+    parser.add_argument('--cicpmp_counterfactual_weight', type=float, default=0.05, help='CICP-MP calibrated real-vs-shuffled category loss weight')
+    parser.add_argument('--cicpmp_hard_negative_strength', type=float, default=0.50, help='CICP-MP direction-aware contrastive hard-negative weight scale')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

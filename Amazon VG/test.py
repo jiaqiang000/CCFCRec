@@ -10,6 +10,7 @@ from tqdm import tqdm
 from support import build_item_feature_tensors
 from m11_features import load_m11_feature_tensor
 from cicp_features import load_cicp_feature_tensor
+from cicp_mp_features import load_cicp_mp_feature_tensor
 
 
 def resolve_device():
@@ -107,6 +108,9 @@ class Validate:
         cicp_profile_path="",
         use_cicp_features=False,
         reject_cicp_evaluation_columns=True,
+        cicp_mp_profile_path="",
+        use_cicp_mp_features=False,
+        reject_cicp_mp_evaluation_columns=True,
     ):
         print("validate class init")
         validate_csv = pd.read_csv(validate_csv)
@@ -150,6 +154,18 @@ class Validate:
                 item_number=len(self.items),
                 reject_evaluation_columns=reject_cicp_evaluation_columns,
             )
+        self.cicp_mp_feature_tensor = None
+        if use_cicp_mp_features:
+            if not cicp_mp_profile_path:
+                raise ValueError(
+                    "cicp_mp_profile_path is required when use_cicp_mp_features=True"
+                )
+            self.cicp_mp_feature_tensor = load_cicp_mp_feature_tensor(
+                cicp_mp_profile_path,
+                item_serialize_dict,
+                item_number=len(self.items),
+                reject_evaluation_columns=reject_cicp_mp_evaluation_columns,
+            )
 
     def start_validate(self, model):
         # 开始评估
@@ -174,8 +190,17 @@ class Validate:
                 if self.cicp_feature_tensor is not None
                 else None
             )
+            cicp_mp_features = (
+                self.cicp_mp_feature_tensor[batch_start:batch_end].to(device)
+                if self.cicp_mp_feature_tensor is not None
+                else None
+            )
             with torch.no_grad():
-                if m11_features is None and cicp_features is None:
+                if (
+                    m11_features is None
+                    and cicp_features is None
+                    and cicp_mp_features is None
+                ):
                     q_v_c = model(genres, image_feature, genres.shape[0])
                 else:
                     q_v_c = model(
@@ -184,6 +209,7 @@ class Validate:
                         genres.shape[0],
                         m11_features=m11_features,
                         cicp_features=cicp_features,
+                        cicp_mp_features=cicp_mp_features,
                     )
                 ratings = torch.matmul(q_v_c, model.user_embedding.t())
                 top_k = min(max_k, ratings.shape[1])

@@ -34,6 +34,8 @@
 | `watch_cicpr1_six_access_methods_logs.sh` | 读取最新 CICP-R1（类别增量协同可预测性第一轮）六分支结果并显示状态、完成数和最新训练轮次。 | 默认输出一次快照；使用 `--follow` 时每30秒持续刷新 |
 | `run_cicpr2_six_embedding_generation_seed43_fast_uniform_mps_100epoch.sh` | CICP-R2（类别增量协同可预测性第二轮）六种嵌入生成机制统一 launcher（封装启动脚本）；强制冻结 seed43、workers8、batch1024、fast_uniform、MPS 和100epoch。 | `CICP-R2-E1-CDR` 至 `CICP-R2-E6-RCD`；仅 `CICP-R2-E1-CDR` 使用 E4 式隐藏残差，其余为类别增量分解、跨模态注意力、分数蒸馏、序关系反事实监督和可靠性条件类别丢弃 |
 | `watch_cicpr2_six_embedding_generation_logs.sh` | 读取最新 CICP-R2 六分支结果并按完整轮次前缀显示状态、完成数和最新训练轮次。 | 默认输出一次快照；使用 `--follow` 时每30秒持续刷新 |
+| `run_cicpmp_r1_six_mechanisms_seed43_fast_uniform_mps_100epoch.sh` | CICP-MP-R1（第一轮类别增量协同可预测性多分量画像机制）六分支统一 launcher（封装启动脚本）；强制23维安全画像、公共初始化哈希审计、seed43、workers8、batch1024、fast_uniform、MPS和100epoch。 | 可靠残差、方向对齐、归因熵校准、可靠类别专家、校准反事实增量、方向难负例；仅第一支使用E4式隐藏残差 |
+| `watch_cicpmp_r1_six_mechanisms_logs.sh` | 读取最新 CICP-MP-R1 六分支结果，显示公共初始化审计、状态、完成数和最新训练轮次。 | 默认输出一次快照；使用 `--follow` 时每30秒持续刷新 |
 | `run_task4_full_100epoch_mps.sh` | 兼容旧命令的 wrapper（封装转发脚本）。 | 转发到上面的 Task4 实验专用 launcher |
 
 实验专用 launcher 应在结果目录写入 `launcher_manifest.env`，至少记录：
