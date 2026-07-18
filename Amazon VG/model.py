@@ -138,6 +138,35 @@ CICPMP_R1_METHOD_VARIANTS = (
     | CICPMP_R1_COUNTERFACTUAL_METHOD_VARIANTS
     | CICPMP_R1_HARD_NEGATIVE_METHOD_VARIANTS
 )
+CICPMP_FR1_SCALAR_REFERENCE_METHOD_VARIANTS = {
+    "cicpmp_fr1_scalar_residual_reference"
+}
+CICPMP_FR1_MODALITY_FILM_METHOD_VARIANTS = {
+    "cicpmp_fr1_modality_film"
+}
+CICPMP_FR1_CONTENT_EXPERT_METHOD_VARIANTS = {
+    "cicpmp_fr1_content_expert_routing"
+}
+CICPMP_FR1_CROSS_MODAL_ATTENTION_METHOD_VARIANTS = {
+    "cicpmp_fr1_cross_modal_attention"
+}
+CICPMP_FR1_MODALITY_FILM_SHUFFLE_METHOD_VARIANTS = {
+    "cicpmp_fr1_modality_film_shuffle"
+}
+CICPMP_FR1_MP_METHOD_VARIANTS = (
+    CICPMP_FR1_MODALITY_FILM_METHOD_VARIANTS
+    | CICPMP_FR1_CONTENT_EXPERT_METHOD_VARIANTS
+    | CICPMP_FR1_CROSS_MODAL_ATTENTION_METHOD_VARIANTS
+    | CICPMP_FR1_MODALITY_FILM_SHUFFLE_METHOD_VARIANTS
+)
+CICPMP_FR1_METHOD_VARIANTS = (
+    CICPMP_FR1_SCALAR_REFERENCE_METHOD_VARIANTS
+    | CICPMP_FR1_MP_METHOD_VARIANTS
+)
+CICP_INPUT_METHOD_VARIANTS = (
+    CICP_METHOD_VARIANTS | CICPMP_FR1_SCALAR_REFERENCE_METHOD_VARIANTS
+)
+CICPMP_INPUT_METHOD_VARIANTS = CICPMP_R1_METHOD_VARIANTS | CICPMP_FR1_MP_METHOD_VARIANTS
 M11R4_FEATURE_METHOD_VARIANTS = (
     M11R4_PROTECTED_EXPERT_METHOD_VARIANTS
     | M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
@@ -289,11 +318,11 @@ def uses_m11r2_feature_fusion(args):
 
 
 def uses_cicp_features(args):
-    return getattr(args, "method_variant", "baseline") in CICP_METHOD_VARIANTS
+    return getattr(args, "method_variant", "baseline") in CICP_INPUT_METHOD_VARIANTS
 
 
 def uses_cicp_mp_features(args):
-    return getattr(args, "method_variant", "baseline") in CICPMP_R1_METHOD_VARIANTS
+    return getattr(args, "method_variant", "baseline") in CICPMP_INPUT_METHOD_VARIANTS
 
 
 def resolve_m11_feature_mode(args):
@@ -1337,7 +1366,7 @@ def validate_method_args(args):
         floor = float(getattr(args, "m11r4_focal_floor", 0.35))
         if floor <= 0 or floor > 1:
             raise ValueError("m11r4_focal_floor must be in (0, 1]")
-    if method_variant in CICP_METHOD_VARIANTS:
+    if method_variant in CICP_INPUT_METHOD_VARIANTS:
         if not str(getattr(args, "cicp_profile_path", "")).strip():
             raise ValueError("cicp_profile_path is required for CICP variants")
     if method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS:
@@ -1394,9 +1423,10 @@ def validate_method_args(args):
         dropout = float(getattr(args, "cicpr2_category_dropout_max", 0.50))
         if dropout <= 0 or dropout >= 1:
             raise ValueError("cicpr2_category_dropout_max must be in (0, 1)")
-    if method_variant in CICPMP_R1_METHOD_VARIANTS:
+    if method_variant in CICPMP_INPUT_METHOD_VARIANTS:
         if not str(getattr(args, "cicp_mp_profile_path", "")).strip():
             raise ValueError("cicp_mp_profile_path is required for CICP-MP variants")
+    if method_variant in CICPMP_R1_METHOD_VARIANTS:
         if float(getattr(args, "cicpmp_reliability_scale", 50.0)) <= 0:
             raise ValueError("cicpmp_reliability_scale must be positive")
     if method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS:
@@ -1422,6 +1452,17 @@ def validate_method_args(args):
         strength = float(getattr(args, "cicpmp_hard_negative_strength", 0.50))
         if strength <= 0 or strength > 1:
             raise ValueError("cicpmp_hard_negative_strength must be in (0, 1]")
+    if method_variant in CICPMP_FR1_METHOD_VARIANTS:
+        if int(getattr(args, "cicpmp_fr1_block_dim", 8)) <= 0:
+            raise ValueError("cicpmp_fr1_block_dim must be positive")
+        ratio = float(getattr(args, "cicpmp_fr1_residual_max_ratio", 0.15))
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("cicpmp_fr1_residual_max_ratio must be in (0, 1]")
+        method_weight_decay = float(
+            getattr(args, "cicpmp_fr1_method_weight_decay", 0.0)
+        )
+        if method_weight_decay < 0:
+            raise ValueError("cicpmp_fr1_method_weight_decay must be non-negative")
 
 
 def scalar_text(value):
@@ -1477,6 +1518,81 @@ def parameter_count_by_ownership(model):
         "method_specific": method_specific,
         "total": common + method_specific,
     }
+
+
+def optimizer_parameter_group_audit(model, args):
+    method_variant = getattr(args, "method_variant", "baseline")
+    base_weight_decay = float(getattr(args, "weight_decay", 0.1))
+    if method_variant not in CICPMP_FR1_METHOD_VARIANTS:
+        return {
+            "uses_method_specific_group": False,
+            "base_weight_decay": base_weight_decay,
+            "method_weight_decay": base_weight_decay,
+            "base_parameter_count": sum(
+                int(parameter.numel()) for parameter in model.parameters()
+            ),
+            "method_parameter_count": 0,
+        }
+
+    method_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if name.startswith("cicpmp_fr1_")
+    ]
+    base_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if not name.startswith("cicpmp_fr1_")
+    ]
+    if not method_parameters:
+        raise ValueError(f"{method_variant} has no CICP-MP-FR1 parameters")
+    return {
+        "uses_method_specific_group": True,
+        "base_weight_decay": base_weight_decay,
+        "method_weight_decay": float(
+            getattr(args, "cicpmp_fr1_method_weight_decay", 0.0)
+        ),
+        "base_parameter_count": sum(
+            int(parameter.numel()) for parameter in base_parameters
+        ),
+        "method_parameter_count": sum(
+            int(parameter.numel()) for parameter in method_parameters
+        ),
+    }
+
+
+def build_optimizer(model, args):
+    audit = optimizer_parameter_group_audit(model, args)
+    learning_rate = float(getattr(args, "learning_rate", 0.0001))
+    if not audit["uses_method_specific_group"]:
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=audit["base_weight_decay"],
+        )
+
+    base_parameters = []
+    method_parameters = []
+    for name, parameter in model.named_parameters():
+        if name.startswith("cicpmp_fr1_"):
+            method_parameters.append(parameter)
+        else:
+            base_parameters.append(parameter)
+    return torch.optim.Adam(
+        [
+            {
+                "params": base_parameters,
+                "weight_decay": audit["base_weight_decay"],
+                "group_name": "ccfcrec_base",
+            },
+            {
+                "params": method_parameters,
+                "weight_decay": audit["method_weight_decay"],
+                "group_name": "cicpmp_fr1_method",
+            },
+        ],
+        lr=learning_rate,
+    )
 
 
 def training_result_header():
@@ -1593,6 +1709,36 @@ def build_run_config(args, model):
         "cicpmp_e4_style_residual_is_unique": (
             method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS
         ),
+        "cicpmp_fr1_final_repair": method_variant in CICPMP_FR1_METHOD_VARIANTS,
+        "cicpmp_fr1_e4_style_hidden_residual": (
+            method_variant in CICPMP_FR1_SCALAR_REFERENCE_METHOD_VARIANTS
+        ),
+        "cicpmp_fr1_input_standardization": (
+            "train_feature_wise"
+            if method_variant in CICPMP_FR1_MP_METHOD_VARIANTS
+            else "not_applicable"
+        ),
+        "cicpmp_fr1_block_dim": int(
+            getattr(args, "cicpmp_fr1_block_dim", 0)
+        ),
+        "cicpmp_fr1_residual_max_ratio": float(
+            getattr(args, "cicpmp_fr1_residual_max_ratio", 0.0)
+        ),
+        "cicpmp_fr1_activation_schedule": (
+            "none" if method_variant in CICPMP_FR1_METHOD_VARIANTS else "not_applicable"
+        ),
+        "cicpmp_fr1_initial_effect": (
+            "exact_zero"
+            if method_variant in CICPMP_FR1_METHOD_VARIANTS
+            else "not_applicable"
+        ),
+        "cicpmp_fr1_uses_offline_auxiliary_target": (
+            False if method_variant in CICPMP_FR1_METHOD_VARIANTS else None
+        ),
+        "cicpmp_fr1_uses_fixed_reliability_multiplication": (
+            False if method_variant in CICPMP_FR1_METHOD_VARIANTS else None
+        ),
+        "optimizer_parameter_groups": optimizer_parameter_group_audit(model, args),
         "ccfcrec_common_parameter_sha256": ccfcrec_common_parameter_sha256(model),
         "parameter_count": parameter_count_by_ownership(model),
         "training_input_uses_validation_item_metrics": False,
@@ -1685,9 +1831,16 @@ class CCFCRec(nn.Module):
         self.cicpmp_expert_strength = float(
             getattr(args, "cicpmp_expert_strength", 0.20)
         )
+        self.cicpmp_fr1_block_dim = int(
+            getattr(args, "cicpmp_fr1_block_dim", 8)
+        )
+        self.cicpmp_fr1_residual_max_ratio = float(
+            getattr(args, "cicpmp_fr1_residual_max_ratio", 0.15)
+        )
         self._last_m11_residual = None
         self._last_cicp_residual = None
         self._last_cicpmp_residual = None
+        self._last_cicpmp_gate = None
         self._last_attr_attention_weight = None
         self.category_bin_count = 4
         if self.uses_category_confidence():
@@ -1847,7 +2000,7 @@ class CCFCRec(nn.Module):
         return self.method_variant in M11R4_CONTINUOUS_FUSION_METHOD_VARIANTS
 
     def uses_cicp_features(self):
-        return self.method_variant in CICP_METHOD_VARIANTS
+        return self.method_variant in CICP_INPUT_METHOD_VARIANTS
 
     def uses_cicpr1_e4_residual(self):
         return self.method_variant in CICPR1_E4_RESIDUAL_METHOD_VARIANTS
@@ -1877,7 +2030,25 @@ class CCFCRec(nn.Module):
         return self.method_variant in CICPR2_RELIABILITY_DROPOUT_METHOD_VARIANTS
 
     def uses_cicp_mp_features(self):
-        return self.method_variant in CICPMP_R1_METHOD_VARIANTS
+        return self.method_variant in CICPMP_INPUT_METHOD_VARIANTS
+
+    def uses_cicpmp_fr1_scalar_reference(self):
+        return self.method_variant in CICPMP_FR1_SCALAR_REFERENCE_METHOD_VARIANTS
+
+    def uses_cicpmp_fr1_modality_film(self):
+        return self.method_variant in (
+            CICPMP_FR1_MODALITY_FILM_METHOD_VARIANTS
+            | CICPMP_FR1_MODALITY_FILM_SHUFFLE_METHOD_VARIANTS
+        )
+
+    def uses_cicpmp_fr1_content_expert(self):
+        return self.method_variant in CICPMP_FR1_CONTENT_EXPERT_METHOD_VARIANTS
+
+    def uses_cicpmp_fr1_cross_modal_attention(self):
+        return self.method_variant in CICPMP_FR1_CROSS_MODAL_ATTENTION_METHOD_VARIANTS
+
+    def uses_cicpmp_fr1_mp(self):
+        return self.method_variant in CICPMP_FR1_MP_METHOD_VARIANTS
 
     def uses_cicpmp_reliable_residual(self):
         return self.method_variant in CICPMP_R1_RELIABLE_RESIDUAL_METHOD_VARIANTS
@@ -1964,10 +2135,16 @@ class CCFCRec(nn.Module):
             nn.init.zeros_(self.cicpr2_score_head[2].bias)
 
     def __init_cicpmp_modules__(self):
-        if not self.uses_cicp_mp_features():
+        if not (
+            self.uses_cicp_mp_features()
+            or self.uses_cicpmp_fr1_scalar_reference()
+        ):
             return
         seed = int(getattr(self.args, "seed", 43))
-        seed_material = f"{seed}:{self.method_variant}:cicpmp_modules".encode("utf-8")
+        seed_key = self.method_variant
+        if self.uses_cicpmp_fr1_modality_film():
+            seed_key = "cicpmp_fr1_modality_film_pair"
+        seed_material = f"{seed}:{seed_key}:cicpmp_modules".encode("utf-8")
         module_seed = int.from_bytes(
             hashlib.sha256(seed_material).digest()[:8],
             byteorder="big",
@@ -1976,7 +2153,122 @@ class CCFCRec(nn.Module):
         # 新增模块的构造和初始化在独立随机流中完成，不能推进公共参数随机流。
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(module_seed)
-            if self.uses_cicpmp_reliable_residual():
+            if self.uses_cicpmp_fr1_scalar_reference():
+                self.cicpmp_fr1_scalar_projection = nn.Linear(
+                    CICP_FEATURE_WIDTH,
+                    self.cicpmp_fr1_block_dim,
+                    bias=True,
+                )
+                self.cicpmp_fr1_scalar_to_hidden = nn.Linear(
+                    self.cicpmp_fr1_block_dim,
+                    self.args.cat_implicit_dim,
+                    bias=False,
+                )
+                nn.init.xavier_normal_(self.cicpmp_fr1_scalar_projection.weight)
+                nn.init.zeros_(self.cicpmp_fr1_scalar_projection.bias)
+                nn.init.zeros_(self.cicpmp_fr1_scalar_to_hidden.weight)
+            elif self.uses_cicpmp_fr1_mp():
+                self.cicpmp_fr1_magnitude_encoder = nn.Linear(
+                    3,
+                    self.cicpmp_fr1_block_dim,
+                    bias=True,
+                )
+                self.cicpmp_fr1_attribution_encoder = nn.Linear(
+                    2,
+                    self.cicpmp_fr1_block_dim,
+                    bias=True,
+                )
+                self.cicpmp_fr1_confidence_encoder = nn.Linear(
+                    2,
+                    self.cicpmp_fr1_block_dim,
+                    bias=True,
+                )
+                self.cicpmp_fr1_direction_encoder = nn.Linear(
+                    CICP_MP_FEATURE_WIDTH - CICP_MP_DIRECTION_START,
+                    self.cicpmp_fr1_block_dim,
+                    bias=True,
+                )
+                block_encoders = (
+                    self.cicpmp_fr1_magnitude_encoder,
+                    self.cicpmp_fr1_attribution_encoder,
+                    self.cicpmp_fr1_confidence_encoder,
+                    self.cicpmp_fr1_direction_encoder,
+                )
+                for encoder in block_encoders:
+                    nn.init.xavier_normal_(encoder.weight)
+                    nn.init.zeros_(encoder.bias)
+                condition_dim = 4 * self.cicpmp_fr1_block_dim
+
+                if self.uses_cicpmp_fr1_modality_film():
+                    self.cicpmp_fr1_attr_scale = nn.Linear(
+                        condition_dim,
+                        self.args.attr_present_dim,
+                    )
+                    self.cicpmp_fr1_attr_shift = nn.Linear(
+                        condition_dim,
+                        self.args.attr_present_dim,
+                    )
+                    self.cicpmp_fr1_image_scale = nn.Linear(
+                        condition_dim,
+                        self.args.implicit_dim,
+                    )
+                    self.cicpmp_fr1_image_shift = nn.Linear(
+                        condition_dim,
+                        self.args.implicit_dim,
+                    )
+                    for head in (
+                        self.cicpmp_fr1_attr_scale,
+                        self.cicpmp_fr1_attr_shift,
+                        self.cicpmp_fr1_image_scale,
+                        self.cicpmp_fr1_image_shift,
+                    ):
+                        nn.init.zeros_(head.weight)
+                        nn.init.zeros_(head.bias)
+                elif self.uses_cicpmp_fr1_content_expert():
+                    self.cicpmp_fr1_category_expert = nn.Linear(
+                        self.args.attr_present_dim,
+                        self.args.cat_implicit_dim,
+                        bias=False,
+                    )
+                    self.cicpmp_fr1_image_expert = nn.Linear(
+                        self.args.implicit_dim,
+                        self.args.cat_implicit_dim,
+                        bias=False,
+                    )
+                    self.cicpmp_fr1_joint_expert = nn.Linear(
+                        self.args.cat_implicit_dim,
+                        self.args.cat_implicit_dim,
+                        bias=False,
+                    )
+                    self.cicpmp_fr1_expert_router = nn.Linear(condition_dim, 3)
+                    self.cicpmp_fr1_expert_blend = nn.Linear(condition_dim, 1)
+                    for expert in (
+                        self.cicpmp_fr1_category_expert,
+                        self.cicpmp_fr1_image_expert,
+                        self.cicpmp_fr1_joint_expert,
+                    ):
+                        nn.init.xavier_normal_(expert.weight)
+                    nn.init.zeros_(self.cicpmp_fr1_expert_router.weight)
+                    nn.init.zeros_(self.cicpmp_fr1_expert_router.bias)
+                    nn.init.zeros_(self.cicpmp_fr1_expert_blend.weight)
+                    nn.init.zeros_(self.cicpmp_fr1_expert_blend.bias)
+                elif self.uses_cicpmp_fr1_cross_modal_attention():
+                    self.cicpmp_fr1_image_query = nn.Linear(
+                        self.args.implicit_dim,
+                        self.args.attr_present_dim,
+                        bias=False,
+                    )
+                    self.cicpmp_fr1_category_key = nn.Linear(
+                        self.args.attr_present_dim,
+                        self.args.attr_present_dim,
+                        bias=False,
+                    )
+                    self.cicpmp_fr1_attention_blend = nn.Linear(condition_dim, 1)
+                    nn.init.xavier_normal_(self.cicpmp_fr1_image_query.weight)
+                    nn.init.xavier_normal_(self.cicpmp_fr1_category_key.weight)
+                    nn.init.zeros_(self.cicpmp_fr1_attention_blend.weight)
+                    nn.init.zeros_(self.cicpmp_fr1_attention_blend.bias)
+            elif self.uses_cicpmp_reliable_residual():
                 self.cicpmp_input_norm = nn.LayerNorm(
                     CICP_MP_FEATURE_WIDTH,
                     elementwise_affine=False,
@@ -2017,6 +2309,19 @@ class CCFCRec(nn.Module):
                 nn.init.zeros_(self.cicpmp_expert_gate[0].bias)
                 nn.init.zeros_(self.cicpmp_expert_gate[2].weight)
                 nn.init.constant_(self.cicpmp_expert_gate[2].bias, -2.2)
+
+    def build_cicpmp_fr1_condition(self, cicp_mp):
+        if not self.uses_cicpmp_fr1_mp():
+            raise ValueError("CICP-MP-FR1 block condition is unavailable")
+        blocks = (
+            self.cicpmp_fr1_magnitude_encoder(cicp_mp[:, 0:3]),
+            self.cicpmp_fr1_attribution_encoder(cicp_mp[:, 3:5]),
+            self.cicpmp_fr1_confidence_encoder(cicp_mp[:, 5:7]),
+            self.cicpmp_fr1_direction_encoder(
+                cicp_mp[:, CICP_MP_DIRECTION_START:]
+            ),
+        )
+        return torch.cat(tuple(self.h(block) for block in blocks), dim=1)
 
     def build_category_conf_bins(self, attribute):
         category_count = (attribute != -1).sum(dim=1)
@@ -2065,6 +2370,7 @@ class CCFCRec(nn.Module):
         self._last_m11_residual = None
         self._last_cicp_residual = None
         self._last_cicpmp_residual = None
+        self._last_cicpmp_gate = None
         self._last_attr_attention_weight = None
         features = None
         if self.uses_m11r2_feature_fusion():
@@ -2098,6 +2404,7 @@ class CCFCRec(nn.Module):
                     f"[batch,{CICP_MP_FEATURE_WIDTH}], got {tuple(cicp_mp_features.shape)}"
                 )
             cicp_mp = cicp_mp_features.to(dtype=self.attr_matrix.dtype)
+        cicpmp_fr1_condition = None
         z_v = torch.matmul(torch.matmul(self.attr_matrix, self.attr_W1)+self.attr_b1.squeeze(), self.attr_W2)
         z_v_copy = z_v.repeat(batch_size, 1, 1)
         z_v_squeeze = z_v_copy.squeeze(dim=2)
@@ -2111,6 +2418,33 @@ class CCFCRec(nn.Module):
         self._last_attr_attention_weight = attr_attention_weight
         final_attr_emb = torch.matmul(attr_attention_weight, self.attr_matrix)
         p_v = torch.matmul(image_feature, self.image_projection)  # item的图像嵌入向量
+        if self.uses_cicpmp_fr1_mp():
+            cicpmp_fr1_condition = self.build_cicpmp_fr1_condition(cicp_mp)
+        if self.uses_cicpmp_fr1_cross_modal_attention():
+            image_query = F.normalize(
+                self.cicpmp_fr1_image_query(p_v),
+                dim=1,
+                eps=1e-6,
+            )
+            category_key = F.normalize(
+                self.cicpmp_fr1_category_key(self.attr_matrix),
+                dim=1,
+                eps=1e-6,
+            )
+            content_logits = torch.matmul(image_query, category_key.t())
+            content_logits = torch.where(attribute != -1, content_logits, neg_inf)
+            content_attention = torch.softmax(content_logits, dim=1)
+            content_attr_emb = torch.matmul(content_attention, self.attr_matrix)
+            attention_blend = 2.0 * (
+                torch.sigmoid(
+                    self.cicpmp_fr1_attention_blend(cicpmp_fr1_condition)
+                )
+                - 0.5
+            )
+            self._last_cicpmp_gate = attention_blend
+            final_attr_emb = final_attr_emb + attention_blend * (
+                content_attr_emb - final_attr_emb
+            )
         if self.uses_cicpr2_cross_modal_attention():
             image_query = F.normalize(
                 self.cicpr2_attention_image_query(p_v),
@@ -2152,6 +2486,41 @@ class CCFCRec(nn.Module):
             image_scale = torch.tanh(self.m11r4_image_scale(condition)) * signal
             final_attr_emb = final_attr_emb * (1.0 + self.m11r4_fusion_strength * attr_scale)
             p_v = p_v * (1.0 + self.m11r4_fusion_strength * image_scale)
+        if self.uses_cicpmp_fr1_modality_film():
+            attr_scale = torch.tanh(
+                self.cicpmp_fr1_attr_scale(cicpmp_fr1_condition)
+            )
+            attr_shift = torch.tanh(
+                self.cicpmp_fr1_attr_shift(cicpmp_fr1_condition)
+            )
+            image_scale = torch.tanh(
+                self.cicpmp_fr1_image_scale(cicpmp_fr1_condition)
+            )
+            image_shift = torch.tanh(
+                self.cicpmp_fr1_image_shift(cicpmp_fr1_condition)
+            )
+            attr_rms = (
+                final_attr_emb.detach()
+                .pow(2)
+                .mean(dim=1, keepdim=True)
+                .sqrt()
+                .clamp_min(1e-6)
+            )
+            image_rms = (
+                p_v.detach()
+                .pow(2)
+                .mean(dim=1, keepdim=True)
+                .sqrt()
+                .clamp_min(1e-6)
+            )
+            final_attr_emb = (
+                final_attr_emb * (1.0 + attr_scale) + attr_rms * attr_shift
+            )
+            p_v = p_v * (1.0 + image_scale) + image_rms * image_shift
+            self._last_cicpmp_gate = torch.cat(
+                (attr_scale, attr_shift, image_scale, image_shift),
+                dim=1,
+            )
         q_v_a = self.build_generator_input(final_attr_emb, p_v, attribute)
         hidden = self.gen_layer1(q_v_a)
         if self.uses_cicpr2_category_increment():
@@ -2173,6 +2542,17 @@ class CCFCRec(nn.Module):
             )
             self._last_cicp_residual = cicp_residual
             hidden = hidden + cicp_residual
+        elif self.uses_cicpmp_fr1_scalar_reference():
+            cicpmp_residual = self.cicpmp_fr1_scalar_to_hidden(
+                self.h(self.cicpmp_fr1_scalar_projection(cicp))
+            )
+            cicpmp_residual = cap_cicp_residual_norm(
+                cicpmp_residual,
+                hidden,
+                self.cicpmp_fr1_residual_max_ratio,
+            )
+            self._last_cicpmp_residual = cicpmp_residual
+            hidden = hidden + cicpmp_residual
         elif self.uses_cicpr2_content_direction_residual():
             content_direction = torch.tanh(
                 self.cicpr2_residual_category_direction(final_attr_emb)
@@ -2224,6 +2604,28 @@ class CCFCRec(nn.Module):
             )
             expert_hidden = self.cicpmp_category_expert(final_attr_emb)
             hidden = (1.0 - expert_gate) * hidden + expert_gate * expert_hidden
+        elif self.uses_cicpmp_fr1_content_expert():
+            expert_weights = torch.softmax(
+                self.cicpmp_fr1_expert_router(cicpmp_fr1_condition),
+                dim=1,
+            )
+            expert_stack = torch.stack(
+                (
+                    self.cicpmp_fr1_category_expert(final_attr_emb),
+                    self.cicpmp_fr1_image_expert(p_v),
+                    self.cicpmp_fr1_joint_expert(hidden),
+                ),
+                dim=1,
+            )
+            expert_hidden = torch.sum(
+                expert_weights[:, :, None] * expert_stack,
+                dim=1,
+            )
+            expert_blend = torch.tanh(
+                self.cicpmp_fr1_expert_blend(cicpmp_fr1_condition)
+            )
+            self._last_cicpmp_gate = expert_blend
+            hidden = hidden + expert_blend * (expert_hidden - hidden)
         if self.uses_m11r2_feature_fusion():
             features = features.to(hidden.dtype)
             if self.uses_m11r3_film():
@@ -2804,7 +3206,7 @@ if __name__ == '__main__':
     train_loader = torch.utils.data.DataLoader(dataSet, **loader_kwargs)
     print("模型超参数:", args_tostring(args))
     myModel = CCFCRec(args)
-    optimizer = torch.optim.Adam(myModel.parameters(), lr=args.learning_rate, weight_decay=0.1)
+    optimizer = build_optimizer(myModel, args)
     validator = Validate(
         validate_csv=vliad_path,
         user_serialize_dict=user_ser_dict,

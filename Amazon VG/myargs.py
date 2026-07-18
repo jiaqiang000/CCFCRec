@@ -91,6 +91,11 @@ def get_args():
             'cicpmp_r1_reliable_expert',
             'cicpmp_r1_counterfactual_calibration',
             'cicpmp_r1_direction_hard_negative',
+            'cicpmp_fr1_scalar_residual_reference',
+            'cicpmp_fr1_modality_film',
+            'cicpmp_fr1_content_expert_routing',
+            'cicpmp_fr1_cross_modal_attention',
+            'cicpmp_fr1_modality_film_shuffle',
         ],
         help='training method variant',
     )
@@ -157,6 +162,9 @@ def get_args():
     parser.add_argument('--cicpmp_expert_strength', type=float, default=0.20, help='maximum CICP-MP category expert mixture share')
     parser.add_argument('--cicpmp_counterfactual_weight', type=float, default=0.05, help='CICP-MP calibrated real-vs-shuffled category loss weight')
     parser.add_argument('--cicpmp_hard_negative_strength', type=float, default=0.50, help='CICP-MP direction-aware contrastive hard-negative weight scale')
+    parser.add_argument('--cicpmp_fr1_block_dim', type=int, default=8, help='per-semantic-block encoder width for the final CICP-MP repair')
+    parser.add_argument('--cicpmp_fr1_residual_max_ratio', type=float, default=0.15, help='maximum hidden residual ratio for the sole scalar reference')
+    parser.add_argument('--cicpmp_fr1_method_weight_decay', type=float, default=0.0, help='weight decay applied only to CICP-MP-FR1 method parameters')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count')
     parser.add_argument('--pin_memory', action='store_true', help='pin host memory for faster CUDA transfer')
     parser.add_argument('--persistent_workers', action='store_true', help='keep DataLoader workers alive between epochs')

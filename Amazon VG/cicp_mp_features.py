@@ -80,13 +80,19 @@ def build_cicp_mp_feature_frame(
     values = features.to_numpy(dtype=np.float32)
     if not np.isfinite(values).all():
         raise ValueError("CICP-MP retained features must all be finite")
-    # 归因比例与熵是折外回归预测，不强行改写原画像；各机制在使用位置裁剪。
-    for column in (
-        "mp_fold_prediction_uncertainty",
-        "mp_hgb_ridge_disagreement",
-    ):
-        if (features[column] < 0.0).any():
-            raise ValueError(f"CICP-MP {column} must be non-negative")
+    standardization = profile.get("cicpmp_standardization")
+    is_train_standardized = (
+        standardization is not None
+        and standardization.astype(str).eq("train_feature_wise_zscore_v1").all()
+    )
+    if not is_train_standardized:
+        # 原始画像中的不确定性和模型分歧必须非负；训练集标准化后允许负值。
+        for column in (
+            "mp_fold_prediction_uncertainty",
+            "mp_hgb_ridge_disagreement",
+        ):
+            if (features[column] < 0.0).any():
+                raise ValueError(f"CICP-MP {column} must be non-negative")
     return features.astype("float32")
 
 
